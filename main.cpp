@@ -87,10 +87,8 @@ namespace mvm {
 
             fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, totalSamples);
             pcmData.resize(totalSamples * channels);
-            float** pcm = new float *[channels];
-            for (int i = 0; i < channels; i++) {
-                pcm[i] = &pcmData[i * totalSamples];
-            }
+            float** pcm;
+            size_t startOffset = 0;
             long samplesRead = 0;
             int bitstream = 0;
             while (samplesRead < totalSamples) {
@@ -102,21 +100,17 @@ namespace mvm {
 
                 if(bytesRead > 0)
                 {
-                    for(int i = 0; i < channels; ++i)
+                    for (int c = 0; c < channels; ++c)
                     {
-                        int channels = channels;
-                        float *pTemp = &pcmData[i];
-                        for(int j = 0; j < bytesRead; ++j)
+                        for (int s = 0; s < bytesRead; ++s)
                         {
-                            // *pTemp = pcm[i][j];
-                            fmt::println("fl{}",pcm[i][j]);
-                            // pTemp += channels;
+                            pcmData[startOffset + s * channels + c] = pcm[c][s];
                         }
                     }
                 }
-
+                startOffset += bytesRead * channels;
                 samplesRead += bytesRead;
-                pcm += bytesRead * channels;
+                // pcm += bytesRead * channels;
             }
             // delete[] pcm; // TODO: check why this crashes
 
@@ -138,7 +132,7 @@ namespace mvm {
 
             for (size_t s=0; s<totalSamples; s++) {
                 left=pcmData[s];
-                fmt::println("{}", left);
+                // fmt::println("fl{}", left);
                 right=pcmData[s+totalSamples];
                 temp[s]= (left + right) / 2.0f;
             }
@@ -184,7 +178,7 @@ namespace mvm {
                             lookupIndex = totalSamples;
                         }
                         temp[j] = bands[band][lookupIndex];
-                        fmt::println("{}",bands[band][lookupIndex] );
+                        // fmt::println("{}",bands[band][lookupIndex] );
                     }
                     vumeters[band][meterindex] = uvMeter(temp);
                     meterindex++;

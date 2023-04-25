@@ -1,24 +1,5 @@
 /*
  * maximal visual madness - call me after dark
- * pixel emphasis function
- * dsp (low, high, mid)
- * starfield
- * last animation frame
- * sparkle
- * special tween non linear
- * spherical projection / off center
- * Pixel growth (starify)
- * layers
- * effect chains
- * color palette loader via png
- * zig zag function
- * game of life layer
- * lorenz attractor
- * tlfx / txmirror
- * fractalizer (barycentric)
- * mix with original
- *
- *
  *
  ffmpeg -framerate 25 -pattern_type glob -i 'walker2_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim.mp4
  *
@@ -35,8 +16,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <fmt/core.h>
-#include <vorbis/vorbisfile.h>
-#include <vorbis/vorbisenc.h>
+#include "sndfile.h"
 #include <fstream>
 
 
@@ -63,76 +43,38 @@ namespace mvm {
 
     class Dsp {
     public:
-        bool loadOgg(const std::string &filename) {
-            // Open the file
-            FILE *file = fopen(filename.c_str(), "rb");
-            if (!file) {
-                std::cerr << "Failed to open file " << filename << std::endl;
+
+        bool loadAudio(std::string filename) {
+            SF_INFO sfinfo;
+            SNDFILE* sndfile = sf_open(filename.c_str(), SFM_READ, &sfinfo);
+
+            if (!sndfile) {
+                std::cerr << "Error opening sound file" << std::endl;
                 return false;
             }
 
-            // Initialize the Ogg Vorbis stream
-            OggVorbis_File oggFile;
-            if (ov_open(file, &oggFile, nullptr, 0) < 0) {
-                std::cerr << "Failed to open Ogg file " << filename << std::endl;
-                fclose(file);
-                return false;
-            }
+            sampleRate = sfinfo.samplerate;
+            channels = sfinfo.channels;
+            samplesPerChannel = sfinfo.frames;
+            fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, samplesPerChannel);
 
-            // Get information about the audio stream
-            vorbis_info *info = ov_info(&oggFile, -1);
-            channels = info->channels;
-            sampleRate = info->rate;
-
-            // Decode the audio data and store it in a vector
-            totalSamples = ov_pcm_total(&oggFile, -1);
-
-            fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, totalSamples);
-            pcmData.resize(totalSamples * channels);
-            float** pcm;
-            size_t startOffset = 0;
-            long samplesRead = 0;
-            int bitstream = 0;
-            while (samplesRead < totalSamples) {
-                long samplesToRead = std::min((long) totalSamples - samplesRead, 4096L);
-                long bytesRead = ov_read_float(&oggFile, &pcm, samplesToRead, &bitstream);
-                if (bytesRead <= 0) {
-                    break;
-                }
-
-                if(bytesRead > 0)
-                {
-                    for (int c = 0; c < channels; ++c)
-                    {
-                        for (int s = 0; s < bytesRead; ++s)
-                        {
-                            pcmData[startOffset + s * channels + c] = pcm[c][s];
-                        }
-                    }
-                }
-                startOffset += bytesRead * channels;
-                samplesRead += bytesRead;
-                // pcm += bytesRead * channels;
-            }
-            // delete[] pcm; // TODO: check why this crashes
-
-            // Clean up and return success
-            ov_clear(&oggFile);
-            fclose(file);
+            pcmData.resize(sfinfo.frames * sfinfo.channels);
+            sf_readf_float(sndfile, pcmData.data(), sfinfo.frames);
+            sf_close(sndfile);
             return true;
         }
 
         void generateDefaultBands(float lowFc, float midFl, float midFh, float highFc) {
             bands.resize(3);
-            bands[0].resize(totalSamples);
-            bands[1].resize(totalSamples);
-            bands[2].resize(totalSamples);
-            std::vector<float> temp (totalSamples);
+            bands[0].resize(samplesPerChannel);
+            bands[1].resize(samplesPerChannel);
+            bands[2].resize(samplesPerChannel);
+            std::vector<float> temp (samplesPerChannel);
             float left, right;
             // generate low pass mono data
             fmt::println("DSP generating low pass ...");
 
-            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+            for (size_t s=0; s < samplesPerChannel * channels; s+=channels) {
                 float sum =0;
                 for (size_t c = 0; c  < channels; c++) {
                   sum+=pcmData[s+c];
@@ -143,7 +85,7 @@ namespace mvm {
             // generate mid pass mono data
             fmt::println("DSP generating mid pass ...");
 
-            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+            for (size_t s=0; s < samplesPerChannel * channels; s+=channels) {
                 float sum =0;
                 for (size_t c = 0; c  < channels; c++) {
                     sum+=pcmData[s+c];
@@ -153,7 +95,7 @@ namespace mvm {
             midpassFilter(temp, bands[1], midFl, midFh);
             // generate high pass mono data
             fmt::println("DSP generating high pass ...");
-            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+            for (size_t s=0; s < samplesPerChannel * channels; s+=channels) {
                 float sum =0;
                 for (size_t c = 0; c  < channels; c++) {
                     sum+=pcmData[s+c];
@@ -164,7 +106,7 @@ namespace mvm {
         }
 
         void generateVuMeters(uint32_t framesPerSecond) {
-            size_t totalMeterSamples = std::ceil( ((double)totalSamples / sampleRate) * framesPerSecond);
+            size_t totalMeterSamples = std::ceil(((double)samplesPerChannel / sampleRate) * framesPerSecond);
             vumeters.resize(bands.size());
             for (size_t band=0; band < bands.size(); band++) {
                 vumeters[band].resize(totalMeterSamples);
@@ -177,12 +119,12 @@ namespace mvm {
             for (size_t band=0; band < bands.size(); band++) {
                 fmt::println("DSP generating VU meter data for band {} ...", band);
                 size_t meterindex = 0;
-                for (size_t s = 0; s < totalSamples; s += junkSize) {
+                for (size_t s = 0; s < samplesPerChannel; s += junkSize) {
                     for (size_t j = 0; j < junkSize; j++) {
                         size_t lookupIndex = s + j;
-                        if (lookupIndex > totalSamples) {
-                            fmt::println("Lookupindex out of bounds: {} > {}", lookupIndex, totalSamples);
-                            lookupIndex = totalSamples;
+                        if (lookupIndex > samplesPerChannel) {
+                            fmt::println("Lookupindex out of bounds: {} > {}", lookupIndex, samplesPerChannel);
+                            lookupIndex = samplesPerChannel;
                         }
                         temp[j] = bands[band][lookupIndex];
                         // fmt::println("{}",bands[band][lookupIndex] );
@@ -344,7 +286,7 @@ namespace mvm {
         std::vector<float> pcmData;
         int channels;
         int sampleRate;
-        size_t totalSamples;
+        size_t samplesPerChannel;
 
         std::vector<std::vector<float>> bands;
         std::vector<std::vector<float>> vumeters;
@@ -1490,7 +1432,7 @@ int main() {
     float fh = 0.5f; // Mid-pass filter higher cutoff frequency
     float fc2 = 0.5f; // High-pass filter cutoff frequency
     mvm::Dsp dsp;
-    if (dsp.loadOgg("shona_silence.ogg")) {
+    if (dsp.loadAudio("shona_silence.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
         dsp.generateVuMeters(25);
     }

@@ -36,6 +36,8 @@
 #include <algorithm>
 #include <fmt/core.h>
 #include <vorbis/vorbisfile.h>
+#include <vorbis/vorbisenc.h>
+#include <fstream>
 
 
 // using namespace std;
@@ -130,28 +132,33 @@ namespace mvm {
             // generate low pass mono data
             fmt::println("DSP generating low pass ...");
 
-            for (size_t s=0; s<totalSamples; s++) {
-                left=pcmData[s];
-                // fmt::println("fl{}", left);
-                right=pcmData[s+totalSamples];
-                temp[s]= (left + right) / 2.0f;
+            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+                float sum =0;
+                for (size_t c = 0; c  < channels; c++) {
+                  sum+=pcmData[s+c];
+                }
+                temp[s >> 1] = sum / channels;
             }
             lowpassFilter(temp, bands[0], lowFc);
             // generate mid pass mono data
             fmt::println("DSP generating mid pass ...");
 
-            for (size_t s=0; s<totalSamples; s++) {
-                left=pcmData[s];
-                right=pcmData[s+totalSamples];
-                temp[s]= (left + right) / 2.0f;
+            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+                float sum =0;
+                for (size_t c = 0; c  < channels; c++) {
+                    sum+=pcmData[s+c];
+                }
+                temp[s >> 1] = sum / channels;
             }
             midpassFilter(temp, bands[1], midFl, midFh);
             // generate high pass mono data
             fmt::println("DSP generating high pass ...");
-            for (size_t s=0; s<totalSamples; s++) {
-                left=pcmData[s];
-                right=pcmData[s+totalSamples];
-                temp[s]= (left + right) / 2.0f;
+            for (size_t s=0; s<totalSamples*channels; s+=channels) {
+                float sum =0;
+                for (size_t c = 0; c  < channels; c++) {
+                    sum+=pcmData[s+c];
+                }
+                temp[s >> 1] = sum / channels;
             }
             highpassFilter(temp, bands[2], highFc);
         }
@@ -301,7 +308,7 @@ namespace mvm {
 
                 // Convert the RMS value to a dBFS value
                 dbfs = 20.0f * std::log10(rms / 1.0f);
-
+                // fmt::println("dbfs{}", dbfs);
                 // Map the dBFS value to the appropriate range to obtain the UV meter value
                 if (dbfs >= -20.0f) {
                     uvmeter = 0.0f;
@@ -328,7 +335,7 @@ namespace mvm {
                 }
             }
 
-            return uvmeter;
+            return std::abs(5.0f-uvmeter);
         }
 
 
@@ -1448,17 +1455,17 @@ namespace mvm {
                 // draw VU meters
                 Color colorVUmeter = { 255, 255, 0, 255};
                 int vux1 = 20;
-                int vux2 = vux1 + (20 * dsp.vumeters[2][frameNumber] );
+                int vux2 = vux1 + (40 * dsp.vumeters[2][frameNumber] );
                 int vuy = 20;
                 drawLine(imageTarget, vux1, vuy, vux2, vuy, colorVUmeter);
                 drawLine(imageTarget, vux1, vuy+1, vux2, vuy+1, colorVUmeter);
 
-                vux2 = vux1 + (20 * dsp.vumeters[1][frameNumber] );
+                vux2 = vux1 + (40 * dsp.vumeters[1][frameNumber] );
                 vuy = 30;
                 drawLine(imageTarget, vux1, vuy, vux2, vuy, colorVUmeter);
                 drawLine(imageTarget, vux1, vuy+1, vux2, vuy+1, colorVUmeter);
 
-                vux2 = vux1 + (20 * dsp.vumeters[0][frameNumber] );
+                vux2 = vux1 + (40 * dsp.vumeters[0][frameNumber] );
                 vuy = 40;
                 drawLine(imageTarget, vux1, vuy, vux2, vuy, colorVUmeter);
                 drawLine(imageTarget, vux1, vuy+1, vux2, vuy+1, colorVUmeter);
@@ -1483,7 +1490,7 @@ int main() {
     float fh = 0.5f; // Mid-pass filter higher cutoff frequency
     float fc2 = 0.5f; // High-pass filter cutoff frequency
     mvm::Dsp dsp;
-    if (dsp.loadOgg("shona.ogg")) {
+    if (dsp.loadOgg("shona_silence.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
         dsp.generateVuMeters(25);
     }

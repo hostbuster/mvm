@@ -64,6 +64,24 @@ namespace mvm {
             return true;
         }
 
+        bool saveToWav(const std::string& filename, const std::vector<float>& data, int sampleRate, int channels) {
+            SF_INFO info = {0};
+            info.samplerate = sampleRate;
+            info.channels = channels;
+            // info.format = SF_FORMAT_OGG | SF_FORMAT_VORBIS;
+            info.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+            SNDFILE* file = sf_open(filename.c_str(), SFM_WRITE, &info);
+            if (!file) {
+                return false;
+            }
+            fmt::println("DSP saving to OGG {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, data.size()/channels);
+
+            sf_count_t count = sf_write_float(file, &data[0], data.size());
+            sf_write_sync(file);
+            sf_close(file);
+            return count == data.size();
+        }
+
         void generateDefaultBands(float lowFc, float midFl, float midFh, float highFc) {
             bands.resize(3);
             bands[0].resize(samplesPerChannel);
@@ -279,9 +297,6 @@ namespace mvm {
 
             return std::abs(5.0f-uvmeter);
         }
-
-
-
 
         std::vector<float> pcmData;
         int channels;
@@ -1432,9 +1447,10 @@ int main() {
     float fh = 0.5f; // Mid-pass filter higher cutoff frequency
     float fc2 = 0.5f; // High-pass filter cutoff frequency
     mvm::Dsp dsp;
-    if (dsp.loadAudio("shona_silence.ogg")) {
+    if (dsp.loadAudio("shona.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
         dsp.generateVuMeters(25);
+        dsp.saveToWav("shona_silence_lowpass.wav", dsp.pcmData, dsp.sampleRate, 1);
     }
 
     std::string img1 = mvm::walker(0.56);

@@ -74,7 +74,7 @@ namespace mvm {
             if (!file) {
                 return false;
             }
-            fmt::println("DSP saving to OGG {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, data.size()/channels);
+            fmt::println("DSP saving to WAV {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, data.size()/channels);
 
             sf_count_t count = sf_write_float(file, &data[0], data.size());
             sf_write_sync(file);
@@ -1450,7 +1450,7 @@ int main() {
     if (dsp.loadAudio("shona.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
         dsp.generateVuMeters(25);
-        dsp.saveToWav("shona_silence_lowpass.wav", dsp.pcmData, dsp.sampleRate, 1);
+        dsp.saveToWav("shona_silence_lowpass.wav", dsp.pcmData, dsp.sampleRate, 2);
     }
 
     std::string img1 = mvm::walker(0.56);

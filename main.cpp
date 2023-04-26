@@ -17,8 +17,6 @@
 #include <algorithm>
 #include <fmt/core.h>
 #include "sndfile.h"
-#include <fstream>
-
 
 // using namespace std;
 namespace mvm {
@@ -123,32 +121,76 @@ namespace mvm {
             highpassFilter(temp, bands[2], highFc);
         }
 
+        std::vector<float> resample(const std::vector<float>& inputSignal, size_t newDurationInSamples)
+        {
+            size_t inputSignalLength = inputSignal.size();
+            float scaleFactor = static_cast<float>(newDurationInSamples) / static_cast<float>(inputSignalLength);
+            std::vector<float> outputSignal(newDurationInSamples);
+
+            for (size_t i = 0; i < newDurationInSamples; ++i) {
+                float inputIndex = static_cast<float>(i) / scaleFactor;
+                size_t lowerInputIndex = static_cast<size_t>(inputIndex);
+                size_t upperInputIndex = lowerInputIndex + 1;
+
+                if (upperInputIndex >= inputSignalLength) {
+                    // Extrapolate the last sample
+                    outputSignal[i] = inputSignal.back();
+                } else {
+                    float fraction = inputIndex - static_cast<float>(lowerInputIndex);
+                    outputSignal[i] = (1.0f - fraction) * inputSignal[lowerInputIndex] +
+                                      fraction * inputSignal[upperInputIndex];
+                }
+            }
+
+            return outputSignal;
+        }
+
+        void resample(const std::vector<float>& inputSignal, std::vector<float>& outputSignal, size_t InputSignalOffset, size_t inputSignalLength,size_t newDurationInSamples)
+        {
+            float scaleFactor = static_cast<float>(newDurationInSamples) / static_cast<float>(inputSignalLength);
+
+            for (size_t i = 0; i < newDurationInSamples; ++i) {
+                float inputIndex = static_cast<float>(i) / scaleFactor;
+                size_t lowerInputIndex = static_cast<size_t>(inputIndex + InputSignalOffset);
+                outputSignal[i] = inputSignal[lowerInputIndex];
+                // fmt::println("{}", outputSignal[i]);
+            }
+        }
+
         void generateVuMeters(uint32_t framesPerSecond) {
-            size_t totalMeterSamples = std::ceil(((double)samplesPerChannel / sampleRate) * framesPerSecond);
+
+            // we have junkSize input signals per frame
+            double junkSize = std::ceil((double)sampleRate / framesPerSecond);
+            size_t junks = std::ceil(samplesPerChannel / junkSize);
+            fmt::println("junksize: {} junks: {}", junkSize, junks);
+            std::vector<float> temp (junkSize);
+
             vumeters.resize(bands.size());
             for (size_t band=0; band < bands.size(); band++) {
-                vumeters[band].resize(totalMeterSamples);
+                vumeters[band].resize(junks);
             }
-            // we have junkSize input signals per frame
-            size_t junkSize = std::ceil((double)sampleRate / framesPerSecond);
-            std::vector<float> temp (junkSize);
 
             // generate for each frequency band
             for (size_t band=0; band < bands.size(); band++) {
                 fmt::println("DSP generating VU meter data for band {} ...", band);
-                size_t meterindex = 0;
-                for (size_t s = 0; s < samplesPerChannel; s += junkSize) {
-                    for (size_t j = 0; j < junkSize; j++) {
-                        size_t lookupIndex = s + j;
-                        if (lookupIndex > samplesPerChannel) {
-                            fmt::println("Lookupindex out of bounds: {} > {}", lookupIndex, samplesPerChannel);
-                            lookupIndex = samplesPerChannel;
-                        }
-                        temp[j] = bands[band][lookupIndex];
-                        // fmt::println("{}",bands[band][lookupIndex] );
+                for (size_t junk = 0; junk < junks; junk++) {
+                    size_t junkStart = std::round(junk * junkSize);
+                    size_t junkEnd = std::round((junk+1) * junkSize);
+                    if (junkEnd-1 > samplesPerChannel) {
+                        fmt::println("band {} junk {} adjusting junkEnd > samplesPerChannel: {} > {}", band, junk, junkEnd, samplesPerChannel);
+
+                        junkEnd = samplesPerChannel-1;
                     }
-                    vumeters[band][meterindex] = uvMeter(temp);
-                    meterindex++;
+                    if (junkStart > samplesPerChannel) {
+                        fmt::println("band {} junk {} adjusting junkStart > samplesPerChannel: {} > {}", band, junk, junkStart, samplesPerChannel);
+                        junkStart = samplesPerChannel;
+                    }
+                    temp[junk]=0;
+                    for (size_t lookupIndex = junkStart; lookupIndex < junkEnd-10; lookupIndex++) {
+                        temp[junk] += bands[band][lookupIndex];
+                    }
+                    temp[junk] /= (junkEnd - junkStart);
+                    vumeters[band][junk] = uvMeter(temp);
                 }
             }
         }
@@ -309,8 +351,7 @@ namespace mvm {
 
 
     bool fileExists(const std::string &filename) {
-        std::ifstream file(filename.c_str());
-        return file.good();
+        return std::filesystem::exists(filename);
     }
 
     struct Color {
@@ -1367,7 +1408,7 @@ namespace mvm {
 
             float stepSize = 1.0f / frames;
             float rotateStepSize = 360.0f / frames;
-
+            std::vector<float> scaledSignal (1000);
             for (int s = 0; s < frames; s++) {
                 std::string fileOut = fileTarget;
                 float fraction = 0.0f + (stepSize * s);
@@ -1375,11 +1416,23 @@ namespace mvm {
                 size_t frameNumber = startFrame + s;
                 std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
                 fileOut += frameNumberString + ".png";
-                fmt::print("generating {}\n", fileOut);
+                fmt::println("generating {}", fileOut);
                 // Interpolate all pixel colors and pixel positions into a new pixels vector / image
                 Image imageTarget(image1.width, image1.height);
+
+                // draw signal
+                size_t samplesPerFrame = dsp.sampleRate / 25;
+                int amplitude = 400;
+                size_t offset=(frameNumber-1)*samplesPerFrame;
+
+                dsp.resample(dsp.bands[0], scaledSignal, offset, samplesPerFrame, image1.width);
+                for (size_t d=0; d < image1.width; d++) {
+                    int y = image1.height/2 + (scaledSignal[d] * amplitude);
+                    setPixel(imageTarget, d, y, {255,255,0,255});
+                }
+
                 imageTarget.setAlpha(255);
-                // check for edge case where we dont need to interpolate
+                // check for edge case where we don't need to interpolate
                 bool sourceIsTarget = false;
                 if (s == 0) {
                     // first frame copy content
@@ -1410,6 +1463,7 @@ namespace mvm {
                     rotateImage(imageTarget, colorBackground, degrees);
                 }
                 // draw VU meters
+                /*
                 Color colorVUmeter = { 255, 255, 0, 255};
                 int vux1 = 20;
                 int vux2 = vux1 + (40 * dsp.vumeters[2][frameNumber] );
@@ -1427,7 +1481,7 @@ namespace mvm {
                 drawLine(imageTarget, vux1, vuy, vux2, vuy, colorVUmeter);
                 drawLine(imageTarget, vux1, vuy+1, vux2, vuy+1, colorVUmeter);
                 fmt::println("VU: {} {} {}", dsp.vumeters[2][frameNumber], dsp.vumeters[1][frameNumber], dsp.vumeters[0][frameNumber]);
-
+                */
                 imageTarget.savePNG(fileOut);
             }
 
@@ -1442,15 +1496,17 @@ namespace mvm {
 
 int main() {
 
-    float fc1 = 0.1f; // Low-pass filter cutoff frequency
+    float fc1 = 0.01f; // Low-pass filter cutoff frequency
     float fl = 0.1f; // Mid-pass filter lower cutoff frequency
     float fh = 0.5f; // Mid-pass filter higher cutoff frequency
     float fc2 = 0.5f; // High-pass filter cutoff frequency
     mvm::Dsp dsp;
     if (dsp.loadAudio("shona.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
-        dsp.generateVuMeters(25);
-        dsp.saveToWav("shona_silence_lowpass.wav", dsp.pcmData, dsp.sampleRate, 2);
+        // dsp.generateVuMeters(25);
+        // dsp.saveToWav("shona_b0.wav", dsp.bands[0], dsp.sampleRate, 1);
+        // dsp.saveToWav("shona_b1.wav", dsp.bands[1], dsp.sampleRate, 1);
+        // dsp.saveToWav("shona_b2.wav", dsp.bands[2], dsp.sampleRate, 1);
     }
 
     std::string img1 = mvm::walker(0.56);

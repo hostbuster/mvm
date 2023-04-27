@@ -1,13 +1,14 @@
 /*
  * maximal visual madness - call me after dark
  *
- ffmpeg -framerate 25 -pattern_type glob -i 'walker2_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim.mp4
+ ffmpeg -framerate 25 -pattern_type glob -i 'walker2_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim__.mp4
  *
  */
 
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <utility>
 #include <vector>
 #include <png.h>
 #include <random>
@@ -38,16 +39,25 @@ namespace mvm {
 #define    f5_16     80        //const int	f5	= (5 << 8) / 16;
 #define    f3_16     48        //const int	f3	= (3 << 8) / 16;
 #define    f1_16     16        //const int	f1	= (1 << 8) / 16;
+    class Config {
+    public:
+        std::string path;
+    };
 
     class Dsp {
     public:
+        Dsp(Config config, uint32_t framesPerSecond) {
+            this->config = std::move(config);
+            this->framesPerSecond = framesPerSecond;
+        }
 
         bool loadAudio(std::string filename) {
             SF_INFO sfinfo;
-            SNDFILE* sndfile = sf_open(filename.c_str(), SFM_READ, &sfinfo);
+            std::string audioFile = config.path+filename;
+            SNDFILE* sndfile = sf_open(audioFile.c_str(), SFM_READ, &sfinfo);
 
             if (!sndfile) {
-                std::cerr << "Error opening sound file" << std::endl;
+                std::cerr << "Error opening sound file " << audioFile << std::endl;
                 return false;
             }
 
@@ -63,12 +73,13 @@ namespace mvm {
         }
 
         bool saveToWav(const std::string& filename, const std::vector<float>& data, int sampleRate, int channels) {
+            std::string audioFile = config.path+filename;
             SF_INFO info = {0};
             info.samplerate = sampleRate;
             info.channels = channels;
             // info.format = SF_FORMAT_OGG | SF_FORMAT_VORBIS;
             info.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
-            SNDFILE* file = sf_open(filename.c_str(), SFM_WRITE, &info);
+            SNDFILE* file = sf_open(audioFile.c_str(), SFM_WRITE, &info);
             if (!file) {
                 return false;
             }
@@ -341,12 +352,15 @@ namespace mvm {
         }
 
         std::vector<float> pcmData;
-        int channels;
-        int sampleRate;
+        uint32_t channels;
+        uint32_t sampleRate;
         size_t samplesPerChannel;
+        uint32_t framesPerSecond;
 
         std::vector<std::vector<float>> bands;
         std::vector<std::vector<float>> vumeters;
+
+        Config config;
     };
 
 
@@ -614,7 +628,7 @@ namespace mvm {
         return color;
     }
 
-// Function to plot a pixel at a given x and y position with a given color
+    // Function to plot a pixel at a given x and y position with a given color
     inline void setPixel(Image &image, int x, int y, Color color) {
         int index = 4 * (y * image.width + x);
         image.data[index] = color.r;
@@ -977,6 +991,7 @@ namespace mvm {
     void drawLinesAroundCenter(Image &image, int x1, int y1, int x2, int y2, Color color,
                                int threshold_manhattan_length = 0) {
 
+        if ((x1>=image.width) || (y1>=image.height) || (x2>=image.width) || (y2>=image.height) ) return;
         int center_x = image.width / 2;
         int center_y = image.height / 2;
 
@@ -990,7 +1005,7 @@ namespace mvm {
         if (x2_offset < 0) x2m = center_x + abs(x2_offset); else x2m = center_x - x2_offset;
         if (y2_offset < 0) y2m = center_y + abs(y2_offset); else y2m = center_y - y2_offset;
 
-
+        if ((x1m>=image.width) || (y1m>=image.height) || (x2m>=image.width) || (y2m>=image.height) ) return;
         drawLine(image, x1, y1, x2, y2, color, threshold_manhattan_length);
         drawLine(image, x1, y1m, x2, y2m, color, threshold_manhattan_length);
         drawLine(image, x1m, y1, x2m, y2, color, threshold_manhattan_length);
@@ -1049,11 +1064,110 @@ namespace mvm {
         }
     }
 
-#include <cmath>
-#include <vector>
+
+    inline bool fixBounds(Image &image, int &x, int &y) {
+        bool valueWasFixed = false;
+        if (x < 0 ) {
+            x = 0;
+            valueWasFixed = true;
+        }
+        if (x >= image.width) {
+            x = image.width-1;
+            valueWasFixed = true;
+        }
+        if (y < 0 ) {
+            y = 0;
+            valueWasFixed = true;
+        }
+        if (y >= image.height) {
+            y = image.height-1;
+            valueWasFixed = true;
+        }
+        return valueWasFixed;
+    }
+
+    inline bool fixBounds(Image &image, uint32_t &x, uint32_t &y) {
+        bool valueWasFixed = false;
+        if (x >= image.width) {
+            x = image.width-1;
+            valueWasFixed = true;
+        }
+        if (y >= image.height) {
+            y = image.height-1;
+            valueWasFixed = true;
+        }
+        return valueWasFixed;
+    }
+
+    inline bool fixBounds(Image &image, float &x, float &y) {
+        bool valueWasFixed = false;
+        if (x < 0 ) {
+            x = 0;
+            valueWasFixed = true;
+        }
+        if (x >= image.width) {
+            x = image.width-1;
+            valueWasFixed = true;
+        }
+        if (y < 0 ) {
+            y = 0;
+            valueWasFixed = true;
+        }
+        if (y >= image.height) {
+            y = image.height-1;
+            valueWasFixed = true;
+        }
+        return valueWasFixed;
+    }
+
+    // TODO: make this more acurate & clean up unused code
+    void drawSquare(Image &image, float centerX, float centerY, float width, Color &color) {
+        // Calculate the subpixel coordinates of the four corners of the square
+        float halfWidth = width / 2.0f;
+        float topLeftX = std::floor(centerX - halfWidth) + 0.5f;
+        float topLeftY = std::floor(centerY - halfWidth) + 0.5f;
+        float topRightX = std::floor(centerX + halfWidth) + 0.5f;
+        float topRightY = std::floor(centerY - halfWidth) + 0.5f;
+        float bottomLeftX = std::floor(centerX - halfWidth) + 0.5f;
+        float bottomLeftY = std::floor(centerY + halfWidth) + 0.5f;
+        float bottomRightX = std::floor(centerX + halfWidth) + 0.5f;
+        float bottomRightY = std::floor(centerY + halfWidth) + 0.5f;
+
+        // Calculate the subpixel offsets of the center point
+        float offsetX = centerX - std::floor(centerX) - 0.5f;
+        float offsetY = centerY - std::floor(centerY) - 0.5f;
+
+        // Calculate the subpixel color values for the four corners of the square
+        float topLeftR = color.r * (1.0f - offsetX) * (1.0f - offsetY);
+        float topLeftG = color.g * (1.0f - offsetX) * (1.0f - offsetY);
+        float topLeftB = color.b * (1.0f - offsetX) * (1.0f - offsetY);
+        float topLeftA = color.alpha * (1.0f - offsetX) * (1.0f - offsetY);
+
+        float topRightR = color.r * offsetX * (1.0f - offsetY);
+        float topRightG = color.g * offsetX * (1.0f - offsetY);
+        float topRightB = color.b * offsetX * (1.0f - offsetY);
+        float topRightA = color.alpha * offsetX * (1.0f - offsetY);
+
+        float bottomLeftR = color.r * (1.0f - offsetX) * offsetY;
+        float bottomLeftG = color.g * (1.0f - offsetX) * offsetY;
+        float bottomLeftB = color.b * (1.0f - offsetX) * offsetY;
+        float bottomLeftA = color.alpha * (1.0f - offsetX) * offsetY;
+
+        float bottomRightR = color.r * offsetX * offsetY;
+        float bottomRightG = color.g * offsetX * offsetY;
+        float bottomRightB = color.b * offsetX * offsetY;
+        float bottomRightA = color.alpha * offsetX * offsetY;
+
+        fixBounds(image, topLeftX, topLeftY);
+        fixBounds(image, topRightX, bottomLeftY);
+
+        for (size_t y = topLeftY; y <= bottomLeftY; y++) {
+            drawLine(image, topLeftX, y, topRightX, y, color);
+        }
+    }
 
 
-// Rotate an image represented by a vector of bytes by a given angle (in degrees)
+    // Rotate an image represented by a vector of bytes by a given angle (in degrees)
     void rotateImage(Image &image, Color colorBackground, float degrees) {
         // Convert the angle to radians
         float radians = degrees * M_PI / 180.0f;
@@ -1110,7 +1224,6 @@ namespace mvm {
 
 
     std::vector<unsigned char> random_walker(uint64_t n) {
-
         std::random_device rd;  // obtain a random seed from hardware
         std::mt19937 gen(rd());  // seed the generator
         std::uniform_int_distribution<> distr(0, 7);  // define the range
@@ -1237,7 +1350,7 @@ namespace mvm {
         return 0;
     }
 
-    std::string walker(double fibFraction, bool regenerate = false) {
+    std::string walker(Config config, double fibFraction, bool regenerate = false) {
         std::cout << "walker 2.0\n";
 
         const int stepSize = 10;
@@ -1246,7 +1359,7 @@ namespace mvm {
         const bool verbose = false;
         const int drawingMode = 1;
 
-        std::string filename = "walker2_";
+        std::string filename = config.path+"walker2_";
         filename += std::to_string(fibFraction);
         filename += "_" + std::to_string(iterations);
         filename += "_" + std::to_string(fillThreshold);
@@ -1368,10 +1481,32 @@ namespace mvm {
         return filename;
     }
 
+    bool isInWaveForm(std::vector<Pixel> &waveForm, int x, int y) {
+        for (auto const &pixel: waveForm) {
+            // early exit if the waveform.x > x (since the waveform is sorted in x ascending order)
+            if (pixel.x > x) return false;
+            if ( (pixel.x == x) && (pixel.y == y)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     int
-    interpolate(Dsp &dsp, std::string file1, std::string file2, const std::string fileTarget, size_t frames, size_t startFrame,
+    interpolate(Config config, Dsp &dsp, std::string file1, std::string file2, const std::string fileTarget, size_t frames, size_t startFrame,
                 Color colorBackground, bool rotate, bool shuffleStartingPositions = false) {
-        // walker();
+
+       // skipp generation if files exist
+        for (int s = 0; s < frames; s++) {
+            std::string fileOut = config.path+fileTarget;
+            size_t frameNumber = startFrame + s;
+            std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
+            fileOut += frameNumberString + ".png";
+            if (fileExists(fileOut)) {
+                fmt::println("block for {} detected", fileOut);
+                return 0;
+            }
+        }
 
         try {
             Image image1(file1);
@@ -1400,7 +1535,6 @@ namespace mvm {
                 pixels[index_to_resize].emplace_back(pixels[index_to_resize][copyIndex]);
             }
 
-
             // random shuffle of starting positions
             if (shuffleStartingPositions) {
                 std::shuffle(std::begin(pixels[0]), std::end(pixels[0]), gen);
@@ -1408,9 +1542,10 @@ namespace mvm {
 
             float stepSize = 1.0f / frames;
             float rotateStepSize = 360.0f / frames;
-            std::vector<float> scaledSignal (1000);
+            std::vector<float> scaledSignal (image1.width);
+            std::vector<Pixel> waveFormPixels (image1.width);
             for (int s = 0; s < frames; s++) {
-                std::string fileOut = fileTarget;
+                std::string fileOut = config.path + fileTarget;
                 float fraction = 0.0f + (stepSize * s);
                 float degrees = 0.0f + (rotateStepSize * s);
                 size_t frameNumber = startFrame + s;
@@ -1420,19 +1555,21 @@ namespace mvm {
                 // Interpolate all pixel colors and pixel positions into a new pixels vector / image
                 Image imageTarget(image1.width, image1.height);
 
-                // draw signal
-                size_t samplesPerFrame = dsp.sampleRate / 25;
+                // acquire signal and set it to waveFormPixels for later processing
+                size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
                 int amplitude = 400;
                 size_t offset=(frameNumber-1)*samplesPerFrame;
 
                 dsp.resample(dsp.bands[0], scaledSignal, offset, samplesPerFrame, image1.width);
                 for (size_t d=0; d < image1.width; d++) {
                     int y = image1.height/2 + (scaledSignal[d] * amplitude);
-                    setPixel(imageTarget, d, y, {255,255,0,255});
+                    // setPixel(imageTarget, d, y, {255,255,0,255});
+                    waveFormPixels[d] = {(uint32_t )d,(uint32_t)y,{255,255,0,255} };
                 }
 
+                // set all pixels of the image to an alpha of 255 (since it is transparent by default)
                 imageTarget.setAlpha(255);
-                // check for edge case where we don't need to interpolate
+                // check for edge cases where we don't need to interpolate
                 bool sourceIsTarget = false;
                 if (s == 0) {
                     // first frame copy content
@@ -1457,6 +1594,11 @@ namespace mvm {
                     for (size_t i = 0; i < interpolatedPixels.size(); i++) {
                         setPixel(imageTarget, interpolatedPixels[i].x, interpolatedPixels[i].y,
                                  interpolatedPixels[i].color);
+                        // additionally scale pixels that are also set in scaled waveForm data
+                        if (isInWaveForm(waveFormPixels, interpolatedPixels[i].x, interpolatedPixels[i].y)) {
+                            float scalingFactor = scaledSignal[interpolatedPixels[i].x] * 7;
+                            drawSquare(imageTarget, interpolatedPixels[i].x, interpolatedPixels[i].y, 4, interpolatedPixels[i].color );
+                        }
                     }
                 }
                 if (rotate && !sourceIsTarget) {
@@ -1494,13 +1636,38 @@ namespace mvm {
     }
 }
 
-int main() {
+void test_squares() {
+    mvm::Image ti (500, 500);
+    ti.setAlpha(255);
+    mvm::Color color = {255, 255,255, 255};
 
-    float fc1 = 0.01f; // Low-pass filter cutoff frequency
-    float fl = 0.1f; // Mid-pass filter lower cutoff frequency
-    float fh = 0.5f; // Mid-pass filter higher cutoff frequency
-    float fc2 = 0.5f; // High-pass filter cutoff frequency
-    mvm::Dsp dsp;
+    for (int y=0; y < ti.height; y+=2) {
+        mvm::drawLine(ti, 0, y, ti.width, y, color);
+    }
+    for (int x=0; x < ti.width; x+=2) {
+        mvm::drawLine(ti, x, 0, x, ti.height, color);
+    }
+     color = {255, 255,0, 255};
+    mvm::drawSquare(ti, 50 ,10, 0.5, color);
+    mvm::drawSquare(ti, 50 ,20, 1.0, color);
+    mvm::drawSquare(ti, 50 ,30, 1.1, color);
+    mvm::drawSquare(ti, 50 ,40, 1.5, color);
+    mvm::drawSquare(ti, 50 ,50, 2.0, color);
+    mvm::drawSquare(ti, 50 ,60, 3.0, color);
+    mvm::drawSquare(ti, 50 ,70, 4.5, color);
+    ti.savePNG("!squares.png");
+}
+
+int main() {
+    float fc1 = 0.01f;      // Low-pass filter cutoff frequency
+    float fl = 0.1f;        // Mid-pass filter lower cutoff frequency
+    float fh = 0.5f;        // Mid-pass filter higher cutoff frequency
+    float fc2 = 0.5f;       // High-pass filter cutoff frequency
+
+    mvm::Config config;
+    config.path="/Users/ulli/Documents/mvm/";
+
+    mvm::Dsp dsp( config,25);
     if (dsp.loadAudio("shona.ogg")) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
         // dsp.generateVuMeters(25);
@@ -1509,48 +1676,64 @@ int main() {
         // dsp.saveToWav("shona_b2.wav", dsp.bands[2], dsp.sampleRate, 1);
     }
 
-    std::string img1 = mvm::walker(0.56);
-    std::string img2 = mvm::walker(0.596);
+    std::string img1 = mvm::walker(config,0.56);
+    std::string img2 = mvm::walker(config,0.596);
     std::string imgInterpolated = "walker2_anim_";
     int frames = 100;
     int startFrame = 1;
     mvm::Color colorBackground = {0, 0, 0, 255};
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.58);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    img2 = mvm::walker(config, 0.58);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.59);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
+    img2 = mvm::walker(config, 0.59);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.66);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    img2 = mvm::walker(config, 0.66);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.33);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
+    img2 = mvm::walker(config, 0.33);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.22);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    img2 = mvm::walker(config, 0.22);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.57);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    img2 = mvm::walker(config, 0.57);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
 
     startFrame += frames;
     img1 = img2;
-    img2 = mvm::walker(0.56);
-    mvm::interpolate(dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
+    img2 = mvm::walker(config, 0.56);
+    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
+
+    std::random_device rd;  // obtain a random seed from hardware
+    std::mt19937 gen(0);  // seed the generator so the sequence is predictable
+    std::uniform_int_distribution<> distr(1, 6);  // define the range
+    std::uniform_int_distribution<> distr_rotate(0, 1);  // define the range
+
+    // generate keyframe images based on the audio sample in the lowpass band
+    for (int i=0; i<300; i++) {
+        frames=distr(gen)*50;
+        bool rotate=distr_rotate(gen);
+        startFrame += frames;
+        size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+        img1 = img2;
+        img2 = mvm::walker(config, dsp.bands[0][samplesPerFrame*(startFrame-1)]);
+        mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
+    }
 
     return 0;
 }

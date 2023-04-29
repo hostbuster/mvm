@@ -1,7 +1,7 @@
 /*
  * maximal visual madness - call me after dark
  *
- ffmpeg -framerate 25 -pattern_type glob -i 'walker2_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim__.mp4
+ ffmpeg -framerate 25 -pattern_type glob -i 'mvm_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim__.mp4
  *
  */
 
@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <fmt/core.h>
+#include <locale>
 #include "sndfile.h"
 
 // using namespace std;
@@ -64,7 +65,10 @@ namespace mvm {
             sampleRate = sfinfo.samplerate;
             channels = sfinfo.channels;
             samplesPerChannel = sfinfo.frames;
-            fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRate, channels, samplesPerChannel);
+            std::locale current_locale("");
+            auto sampleRateStr = fmt::format(std::locale(current_locale.name()), "{:L}", sampleRate);
+            auto samplesPerChannelStr = fmt::format(std::locale("en_US.UTF-8"), "{:L}", samplesPerChannel);
+            fmt::println("DSP loading {}: {} samples/s, {} channels, {:10L} total samples", filename, sampleRateStr, channels, samplesPerChannel);
 
             pcmData.resize(sfinfo.frames * sfinfo.channels);
             sf_readf_float(sndfile, pcmData.data(), sfinfo.frames);
@@ -166,6 +170,20 @@ namespace mvm {
                 outputSignal[i] = inputSignal[lowerInputIndex];
                 // fmt::println("{}", outputSignal[i]);
             }
+        }
+
+        float average(const std::vector<float>& buffer, size_t offset, size_t samples)
+        {
+            float sum=0.0f;
+            size_t indexStart = offset;
+            size_t indexEnd = offset + samples;
+            if ( (indexStart >= buffer.size() ) || ( indexEnd >= buffer.size() ) ){
+                return 0.0f;
+            }
+            for (size_t i = indexStart; i < indexEnd; ++i) {
+                sum+=buffer[i];
+            }
+            return sum / samples;
         }
 
         void generateVuMeters(uint32_t framesPerSecond) {
@@ -446,14 +464,14 @@ namespace mvm {
 
     class Image {
     public:
-        Image(int width, int height) {
+        Image(uint32_t width, uint32_t height) {
             this->width = width;
             this->height = height;
             data.resize(width * height * 4);
             this->heatmapColors = generate_heatmap_color_table(NUMBEROFCOLORS);
         }
 
-        Image(int width, int height, Color colorBackground) {
+        Image(uint32_t width, uint32_t height, Color colorBackground) {
             this->width = width;
             this->height = height;
             data.resize(width * height * 4);
@@ -603,9 +621,9 @@ namespace mvm {
         std::vector<Color> heatmapColors;
     };
 
-    inline bool getPixel(Image &image, int x, int y, Color &color) {
-        if (x < 0 || x >= image.width || y < 0 || y >= image.height) return false; // Out of bounds
-        int index = 4 * (y * image.width + x);
+    inline bool getPixel(Image &image, uint32_t x, uint32_t y, Color &color) {
+        if (x >= image.width || y >= image.height) return false; // Out of bounds
+        size_t index = 4 * (y * image.width + x);
         color.r = image.data[index];
         color.g = image.data[index + 1];
         color.b = image.data[index + 2];
@@ -614,7 +632,7 @@ namespace mvm {
     }
 
     inline Color getPixel(Image &image, int x, int y) {
-        int index = 4 * (y * image.width + x);
+        size_t index = 4 * (y * image.width + x);
         Color color = {image.data[index], image.data[index + 1], image.data[index + 2], image.data[index + 3]};
         return color;
     }
@@ -629,16 +647,16 @@ namespace mvm {
     }
 
     // Function to plot a pixel at a given x and y position with a given color
-    inline void setPixel(Image &image, int x, int y, Color color) {
-        int index = 4 * (y * image.width + x);
+    inline void setPixel(Image &image, uint32_t x, uint32_t y, Color color) {
+        size_t index = 4 * (y * image.width + x);
         image.data[index] = color.r;
         image.data[index + 1] = color.g;
         image.data[index + 2] = color.b;
         image.data[index + 3] = color.alpha;
     }
 
-    inline void setPixel(Image &image, int x, int y, Color colorNew, float weight) {
-        int index = 4 * (y * image.width + x);
+    inline void setPixel(Image &image, uint32_t x, uint32_t y, Color colorNew, float weight) {
+        size_t index = 4 * (y * image.width + x);
         Color colorCurrent = getPixel(image, index);
         Color colorMixed = mixColors(colorCurrent, colorNew, weight);
         image.data[index] = colorMixed.r;
@@ -647,8 +665,8 @@ namespace mvm {
         image.data[index + 3] = colorMixed.alpha;
     }
 
-    inline void setPixelAdd(Image &image, int x, int y, Color colorNew) {
-        int index = 4 * (y * image.width + x);
+    inline void setPixelAdd(Image &image, uint32_t x, uint32_t y, Color colorNew) {
+        size_t index = 4 * (y * image.width + x);
         Color colorCurrent = getPixel(image, index);
         Color colorMixed = addColors(colorCurrent, colorNew);
         image.data[index] = colorMixed.r;
@@ -692,8 +710,8 @@ namespace mvm {
 
     void replaceColor(Image &image, Color colorFind, Color colorReplace) {
         // Iterate over each pixel in the image
-        for (uint32_t y = 1; y < image.height - 1; ++y) {
-            for (uint32_t x = 1; x < image.width - 1; ++x) {
+        for (uint32_t y = 0; y < image.height; ++y) {
+            for (uint32_t x = 0; x < image.width; ++x) {
                 if (getPixel(image, x, y) == colorFind) {
                     setPixel(image, x, y, colorReplace);
                 }
@@ -784,7 +802,7 @@ namespace mvm {
         free(errorR);
     }
 
-    bool hasNeighborOfColorC(Image &image, int x, int y, Color color) {
+    bool hasNeighborOfColorC(Image &image, uint32_t x, uint32_t y, Color color) {
         // Check each neighboring pixel
         Color colorCurrent;
         for (int i = -1; i <= 1; i++) {
@@ -806,7 +824,7 @@ namespace mvm {
         return false;
     }
 
-    size_t edgeFill(Image &image, int x, int y, Color newColor, Color oldColor, Color edgeColor) {
+    size_t edgeFill(Image &image, uint32_t x, uint32_t y, Color newColor, Color oldColor, Color edgeColor) {
         size_t pixelsFilled = 0;
         // std::cout << "ff " << x << "," << y << " " << pixelsFilled << "\n";
         // Base cases
@@ -849,7 +867,7 @@ namespace mvm {
         return pixelsFilled;
     }
 
-    size_t edgeFill(Image &image, int x, int y, Color newColor, Color edgeColor, bool verbose) {
+    size_t edgeFill(Image &image, uint32_t x, uint32_t y, Color newColor, Color edgeColor, bool verbose) {
         image.undoBuffer.clear();
         image.undoBuffer.reserve(image.width * image.height);
         if (verbose) std::cout << "Edge Fill: " << x << "," << y << "\n";
@@ -878,7 +896,7 @@ namespace mvm {
 
 
     size_t
-    floodFill(Image &image, int x, int y, Color newColor, Color oldColor, const bool test, const size_t maxPixels) {
+    floodFill(Image &image, uint32_t x, uint32_t y, Color newColor, Color oldColor, const bool test, const size_t maxPixels) {
         size_t pixelsFilled = 0;
         // std::cout << "ff " << x << "," << y << " " << pixelsFilled << "\n";
         // Base cases
@@ -922,7 +940,7 @@ namespace mvm {
         return pixelsFilled;
     }
 
-    size_t floodFill(Image &image, int x, int y, Color newColor, Color excludeColor, bool test, size_t maxPixels,
+    size_t floodFill(Image &image, uint32_t x, uint32_t y, Color newColor, Color excludeColor, bool test, size_t maxPixels,
                      bool verbose) {
         image.undoBuffer.clear();
         image.undoBuffer.reserve(maxPixels);
@@ -952,10 +970,10 @@ namespace mvm {
         return pixelsFilled;
     }
 
-    void drawLine(Image &image, int x1, int y1, int x2, int y2, Color color, int threshold_manhattan_length = 0) {
+    void drawLine(Image &image, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, Color color, uint32_t threshold_manhattan_length = 0) {
 
-        int dx = abs(x2 - x1);
-        int dy = abs(y2 - y1);
+        int dx = std::abs((int)(x2 - x1));
+        int dy = std::abs((int)(y2 - y1));
         int sx = (x1 < x2) ? 1 : -1;
         int sy = (y1 < y2) ? 1 : -1;
         int err = dx - dy;
@@ -988,8 +1006,8 @@ namespace mvm {
         }
     }
 
-    void drawLinesAroundCenter(Image &image, int x1, int y1, int x2, int y2, Color color,
-                               int threshold_manhattan_length = 0) {
+    void drawLinesAroundCenter(Image &image, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, Color color,
+                               uint32_t threshold_manhattan_length = 0) {
 
         if ((x1>=image.width) || (y1>=image.height) || (x2>=image.width) || (y2>=image.height) ) return;
         int center_x = image.width / 2;
@@ -1012,7 +1030,7 @@ namespace mvm {
         drawLine(image, x1m, y1m, x2m, y2m, color, threshold_manhattan_length);
     }
 
-    std::vector<Pixel> displacePixels(Image &image, int n) {
+    std::vector<Pixel> displacePixels(Image &image, uint32_t n) {
         std::cout << "displacing pixels by radius " << n << "\n";
         std::random_device rd;  // obtain a random seed from hardware
         std::mt19937 gen(rd());  // seed the generator
@@ -1020,8 +1038,8 @@ namespace mvm {
         std::vector<Pixel> pdata;
         pdata.reserve(image.width * image.height);
         Color color;
-        for (int y = 0; y < image.height; y++) {
-            for (int x = 0; x < image.width; x++) {
+        for (uint32_t y = 0; y < image.height; y++) {
+            for (uint32_t x = 0; x < image.width; x++) {
                 int x_offset = distr(gen);
                 int y_offset = distr(gen);
                 int x_new = x + x_offset;
@@ -1120,7 +1138,7 @@ namespace mvm {
         return valueWasFixed;
     }
 
-    // TODO: make this more acurate & clean up unused code
+    // TODO: make this more accurate & clean up unused code
     void drawSquare(Image &image, float centerX, float centerY, float width, Color &color) {
         // Calculate the subpixel coordinates of the four corners of the square
         float halfWidth = width / 2.0f;
@@ -1481,7 +1499,7 @@ namespace mvm {
         return filename;
     }
 
-    bool isInWaveForm(std::vector<Pixel> &waveForm, int x, int y) {
+    bool isInWaveForm(std::vector<Pixel> &waveForm, uint32_t x, uint32_t y) {
         for (auto const &pixel: waveForm) {
             // early exit if the waveform.x > x (since the waveform is sorted in x ascending order)
             if (pixel.x > x) return false;
@@ -1497,7 +1515,7 @@ namespace mvm {
                 Color colorBackground, bool rotate, bool shuffleStartingPositions = false) {
 
        // skipp generation if files exist
-        for (int s = 0; s < frames; s++) {
+        for (size_t s = 0; s < frames; s++) {
             std::string fileOut = config.path+fileTarget;
             size_t frameNumber = startFrame + s;
             std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
@@ -1516,7 +1534,7 @@ namespace mvm {
             fmt::println("Image 1: {} pixels", getPixelsNotHavingBackground(image1, colorBackground, pixels[0]));
             fmt::println("Image 2: {} pixels", getPixelsNotHavingBackground(image2, colorBackground, pixels[1]));
             // now we need to make sure the list have the same number of elements
-            int index_to_resize = 0;
+            size_t index_to_resize = 0;
             size_t resizeToElements = pixels[1].size();
             if (pixels[0].size() > pixels[1].size()) {
                 index_to_resize = 1;
@@ -1544,7 +1562,7 @@ namespace mvm {
             float rotateStepSize = 360.0f / frames;
             std::vector<float> scaledSignal (image1.width);
             std::vector<Pixel> waveFormPixels (image1.width);
-            for (int s = 0; s < frames; s++) {
+            for (uint32_t s = 0; s < frames; s++) {
                 std::string fileOut = config.path + fileTarget;
                 float fraction = 0.0f + (stepSize * s);
                 float degrees = 0.0f + (rotateStepSize * s);
@@ -1562,7 +1580,7 @@ namespace mvm {
 
                 dsp.resample(dsp.bands[0], scaledSignal, offset, samplesPerFrame, image1.width);
                 for (size_t d=0; d < image1.width; d++) {
-                    int y = image1.height/2 + (scaledSignal[d] * amplitude);
+                    uint32_t y = image1.height/2 + (scaledSignal[d] * amplitude);
                     // setPixel(imageTarget, d, y, {255,255,0,255});
                     waveFormPixels[d] = {(uint32_t )d,(uint32_t)y,{255,255,0,255} };
                 }
@@ -1641,10 +1659,10 @@ void test_squares() {
     ti.setAlpha(255);
     mvm::Color color = {255, 255,255, 255};
 
-    for (int y=0; y < ti.height; y+=2) {
+    for (uint32_t y=0; y < ti.height; y+=2) {
         mvm::drawLine(ti, 0, y, ti.width, y, color);
     }
-    for (int x=0; x < ti.width; x+=2) {
+    for (uint32_t x=0; x < ti.width; x+=2) {
         mvm::drawLine(ti, x, 0, x, ti.height, color);
     }
      color = {255, 255,0, 255};
@@ -1676,63 +1694,35 @@ int main() {
         // dsp.saveToWav("shona_b2.wav", dsp.bands[2], dsp.sampleRate, 1);
     }
 
-    std::string img1 = mvm::walker(config,0.56);
-    std::string img2 = mvm::walker(config,0.596);
-    std::string imgInterpolated = "walker2_anim_";
-    int frames = 100;
-    int startFrame = 1;
-    mvm::Color colorBackground = {0, 0, 0, 255};
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+    uint32_t framesToGenerate = dsp.bands[0].size() / samplesPerFrame;
 
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.58);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
+    float average = dsp.average(dsp.bands[0], 0, samplesPerFrame);
 
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.59);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
-
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.66);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
-
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.33);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
-
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.22);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
-
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.57);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, false);
-
-    startFrame += frames;
-    img1 = img2;
-    img2 = mvm::walker(config, 0.56);
-    mvm::interpolate(config, dsp,img1, img2, imgInterpolated, frames, startFrame, colorBackground, true);
+    std::string img1, img2 = mvm::walker(config,average);
+    std::string imgInterpolated = "mvm_anim_";
+    mvm::Color colorBackground = { 0, 0, 0, 255};
+    uint32_t frames = 100;
+    uint32_t startFrame = 1;
 
     std::random_device rd;  // obtain a random seed from hardware
     std::mt19937 gen(0);  // seed the generator so the sequence is predictable
-    std::uniform_int_distribution<> distr(1, 6);  // define the range
-    std::uniform_int_distribution<> distr_rotate(0, 1);  // define the range
+    std::uniform_int_distribution<> distr(1, 6);  // define  the range for frames generation
+    std::uniform_int_distribution<> distr_rotate(0, 1);  // define the rang for bool rotatee
 
     // generate keyframe images based on the audio sample in the lowpass band
-    for (int i=0; i<300; i++) {
+
+    fmt::println("MVM - generating {:L} frames", framesToGenerate);
+    for (uint32_t i=0; i<framesToGenerate; i++) {
         frames=distr(gen)*50;
         bool rotate=distr_rotate(gen);
-        startFrame += frames;
-        size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
         img1 = img2;
-        img2 = mvm::walker(config, dsp.bands[0][samplesPerFrame*(startFrame-1)]);
+        size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
+        average = dsp.average(dsp.bands[0], sampleIndex, samplesPerFrame);
+        img2 = mvm::walker(config, average);
+        fmt::println("transition for frames {} to {}", startFrame, (startFrame+frames)-1);
         mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
+        startFrame += frames;
     }
 
     return 0;

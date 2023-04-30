@@ -20,9 +20,100 @@
 #include <locale>
 #include "sndfile.h"
 
+
+
 // using namespace std;
 namespace mvm {
-    const int NUMBEROFCOLORS = 1500;
+    template <typename T> int sgn(T x) {
+        //return (T(0) < val) - (val < T(0));
+        return ((T)((x) > 0) - (T)((x) < 0));
+    }
+
+    class ColorGradient {
+    private:
+        struct ColorPoint  // Internal class used to store colors at different points in the gradient.
+        {
+            float r, g, b;      // Red, green and blue values of our color.
+            float val;        // Position of our color along the gradient (between 0 and 1).
+            ColorPoint( float red, float green, float blue, float value )
+                    : r(red), g(green), b(blue), val(value) {
+            }
+        };
+        std::vector<ColorPoint> color;      // An array of color points in ascending value.
+
+    public:
+        //-- Default constructor:
+        ColorGradient() {
+            createDefaultHeatMapGradient();
+        }
+
+        //-- Inserts a new color point into its correct position:
+        void addColorPoint( float red, float green, float blue, float value ) {
+            for (int i = 0; i < color.size(); i++) {
+                if ( value < color[i].val ) {
+                    color.insert(color.begin() + i, ColorPoint(red, green, blue, value));
+                    return;
+                }
+            }
+            color.emplace_back(red, green, blue, value);
+        }
+
+        //-- Inserts a new color point into its correct position:
+        void clearGradient() {
+            color.clear();
+        }
+
+        //  col 01
+
+        //-- Places a 5 color heapmap gradient into the "color" vector:
+//    void createDefaultHeatMapGradient() {
+//        color.clear();
+//        color.push_back(ColorPoint(0, 0, 0, 0.0f));      // Black.
+//        color.push_back(ColorPoint(0, 0, 1, 0.125f));    // Blue.
+//        color.push_back(ColorPoint(0, 1, 1, 0.25f));     // Cyan.
+//        color.push_back(ColorPoint(0, 1, 0, 0.5f));      // Green.
+//        color.push_back(ColorPoint(1, 1, 0, 0.75f));     // Yellow.
+//        color.push_back(ColorPoint(1, 0, 0, 1.0f));      // Red.
+//    }
+
+    //  col 02
+    void createDefaultHeatMapGradient() {
+        color.clear();
+        color.emplace_back(0.00, 0.00, 0.00, 0.000f);                  // Black.
+        color.emplace_back(0.00, 0.00, 0.50, 0.250f);                  // Dark Blue.
+        color.emplace_back(0.50, 0.00, 0.50, 0.375f);                  // Dark Violet.
+        color.emplace_back(1.00, 0.00, 0.00, 0.500f);                  // Red.
+        color.emplace_back(1.00, 0.50, 0.00, 0.750f);                  // Orange.
+        color.emplace_back(1.00, 1.00, 0.00, 0.875f);                  // Yellow.
+        color.emplace_back(1.00, 1.00, 1.00, 1.000f);                  // White.
+    }
+
+
+        //-- Inputs a (value) between 0 and 1 and outputs the (red), (green) and (blue)
+        //-- values representing that position in the gradient.
+        void getColorAtValue( const float value, float &red, float &green, float &blue ) {
+            if ( color.empty() )
+                return;
+
+            for (int i = 0; i < color.size(); i++) {
+                ColorPoint &currC = color[i];
+                if ( value < currC.val ) {
+                    ColorPoint &prevC = color[std::max(0, i - 1)];
+                    float valueDiff = ( prevC.val - currC.val );
+                    float fractBetween = ( valueDiff == 0 ) ? 0 : ( value - currC.val ) / valueDiff;
+                    red = ( prevC.r - currC.r ) * fractBetween + currC.r;
+                    green = ( prevC.g - currC.g ) * fractBetween + currC.g;
+                    blue = ( prevC.b - currC.b ) * fractBetween + currC.b;
+                    return;
+                }
+            }
+            red = color.back().r;
+            green = color.back().g;
+            blue = color.back().b;
+       }
+    };
+
+    const int NUMBEROFCOLORS = 500;
     const uint8_t VALUES_18BPP[] = {0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84,
                                     88, 92, 96, 100, 104, 108, 112, 116, 120, 126, 130, 136, 140, 144, 148, 152, 156,
                                     160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224,
@@ -182,6 +273,20 @@ namespace mvm {
             }
             for (size_t i = indexStart; i < indexEnd; ++i) {
                 sum+=buffer[i];
+            }
+            return sum / samples;
+        }
+
+        float absAverage(const std::vector<float>& buffer, size_t offset, size_t samples)
+        {
+            float sum=0.0f;
+            size_t indexStart = offset;
+            size_t indexEnd = offset + samples;
+            if ( (indexStart >= buffer.size() ) || ( indexEnd >= buffer.size() ) ){
+                return 0.0f;
+            }
+            for (size_t i = indexStart; i < indexEnd; ++i) {
+                sum+=std::abs(buffer[i]);
             }
             return sum / samples;
         }
@@ -408,6 +513,71 @@ namespace mvm {
         result.b = (unsigned char) (color1.b * (1 - weight) + color2.b * weight);
         result.alpha = (unsigned char) (color1.alpha * (1 - weight) + color2.alpha * weight);
         return result;
+    }
+
+    inline void blendColor(Color &c1, Color c2)
+    {
+        uint32_t r1 = c1.r;
+        uint32_t g1 = c1.g;
+        uint32_t b1 = c1.b;
+        uint32_t a1 = c1.alpha;
+
+        uint32_t r2 = c2.r;
+        uint32_t g2 = c2.g;
+        uint32_t b2 = c2.b;
+        uint32_t a2 = c2.alpha;
+
+        r1 = (r1*(255 - a2) + r2*a2)/255; if (r1 > 255) r1 = 255;
+        g1 = (g1*(255 - a2) + g2*a2)/255; if (g1 > 255) g1 = 255;
+        b1 = (b1*(255 - a2) + b2*a2)/255; if (b1 > 255) b1 = 255;
+
+        c1 = {static_cast<unsigned char>(r1),
+              static_cast<unsigned char>(g1),
+              static_cast<unsigned char>(b1),
+              static_cast<unsigned char>(a1)};
+    }
+
+    bool barycentric(int x1, int y1, int x2, int y2, int x3, int y3, int xp, int yp, int &u1, int &u2, int &det)
+    {
+        det = ((x1 - x3)*(y2 - y3) - (x2 - x3)*(y1 - y3));
+        u1  = ((y2 - y3)*(xp - x3) + (x3 - x2)*(yp - y3));
+        u2  = ((y3 - y1)*(xp - x3) + (x1 - x3)*(yp - y3));
+        int u3 = det - u1 - u2;
+        return (
+                (sgn(u1) == sgn(det) || sgn(u1) == 0) &&
+                (sgn(u2) == sgn(det) || sgn(u2) == 0) &&
+                (sgn(u3) == sgn(det) || u3 == 0)
+        );
+    }
+
+    // stolen from https://github.com/tsoding/olive.c
+    inline Color mixColors(Color c1, Color c2, Color c3, int u1, int u2, int det)
+    {
+        // TODO: estimate how much overflows are an issue in integer only environment
+        int64_t r1 = c1.r;
+        int64_t g1 = c1.g;
+        int64_t b1 = c1.b;
+        int64_t a1 = c1.alpha;
+
+        int64_t r2 = c2.r;
+        int64_t g2 = c2.g;
+        int64_t b2 = c2.b;
+        int64_t a2 = c2.alpha;
+
+        int64_t r3 = c3.r;
+        int64_t g3 = c3.g;
+        int64_t b3 = c3.b;
+        int64_t a3 = c3.alpha;
+
+        if (det != 0) {
+            int u3 = det - u1 - u2;
+            unsigned char r4 = (r1*u1 + r2*u2 + r3*u3)/det;
+            unsigned char g4 = (g1*u1 + g2*u2 + g3*u3)/det;
+            unsigned char b4 = (b1*u1 + b2*u2 + b3*u3)/det;
+            unsigned char a4 = (a1*u1 + a2*u2 + a3*u3)/det;
+            return {r4, g4, b4, a4};
+        }
+        return { 0, 0, 0, 0};
     }
 
     inline Color addColors(Color color1, Color color2) {
@@ -1029,6 +1199,96 @@ namespace mvm {
         drawLine(image, x1m, y1, x2m, y2, color, threshold_manhattan_length);
         drawLine(image, x1m, y1m, x2m, y2m, color, threshold_manhattan_length);
     }
+    void normalizeTrianglePoints(int& x1, int& y1, int& x2, int& y2, int& x3, int& y3) {
+        // Compute the cross product of the vectors (x2-x1,y2-y1) and (x3-x1,y3-y1)
+        int crossProduct = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
+
+        // If the cross product is negative, swap the second and third points
+        if (crossProduct < 0) {
+            std::swap(x2, x3);
+            std::swap(y2, y3);
+        }
+    }
+
+    bool normalizeTriangle(size_t width, size_t height, int x1, int y1, int x2, int y2, int x3, int y3, int &lx, int &hx, int &ly, int &hy)
+    {
+        lx = x1;
+        hx = x1;
+        if (lx > x2) lx = x2;
+        if (lx > x3) lx = x3;
+        if (hx < x2) hx = x2;
+        if (hx < x3) hx = x3;
+        if (lx < 0) lx = 0;
+        if ((size_t) lx >= width) return false;;
+        if (hx < 0) return false;;
+        if ((size_t) hx >= width) hx = width-1;
+
+        ly = y1;
+        hy = y1;
+        if (ly > y2) ly = y2;
+        if (ly > y3) ly = y3;
+        if (hy < y2) hy = y2;
+        if (hy < y3) hy = y3;
+        if (ly < 0) ly = 0;
+        if ((size_t) ly >= height) return false;;
+        if (hy < 0) return false;;
+        if ((size_t) hy >= height) hy = height-1;
+
+        return true;
+    }
+
+
+    void drawSolidTriangle(Image &image, int x1, int y1, int x2, int y2, int x3, int y3,
+                           Color c1, Color c2, Color c3)
+    {
+        int lx, hx, ly, hy;
+        if (normalizeTriangle(image.width, image.height, x1, y1, x2, y2, x3, y3, lx, hx, ly, hy)) {
+            Color color;
+            for (int y = ly; y <= hy; ++y) {
+                for (int x = lx; x <= hx; ++x) {
+                    int u1, u2, det;
+                    if (barycentric(x1, y1, x2, y2, x3, y3, x, y, u1, u2, det)) {
+                        color = getPixel(image, x, y);
+                        blendColor(color, mixColors(c1, c2, c3, u1, u2, det));
+                        setPixel(image, x, y, color);
+                    }
+                }
+            }
+        }
+    }
+
+    void drawSolidTriangle(Image &image, int x1, int y1, int x2, int y2, int x3, int y3, Color &color) {
+        // Check if the coordinates of the triangle are within the image bounds
+        if (x1 < 0 || x1 >= image.width || y1 < 0 || y1 >= image.height || x2 < 0 || x2 >= image.width || y2 < 0 || y2 >= image.height || x3 < 0 || x3 >= image.width || y3 < 0 || y3 >= image.height) {
+            return;
+        }
+
+        // Normalize the order of the points
+        normalizeTrianglePoints(x1, y1, x2, y2, x3, y3);
+
+        // Find the bounding box of the triangle
+        int minX = std::min({x1, x2, x3});
+        int minY = std::min({y1, y2, y3});
+        int maxX = std::max({x1, x2, x3});
+        int maxY = std::max({y1, y2, y3});
+
+        // Iterate over each pixel in the bounding box
+        for (int y = minY; y <= maxY; y++) {
+            for (int x = minX; x <= maxX; x++) {
+                // Check if the pixel is inside the triangle
+                if (((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)) >= 0 && ((x3 - x2) * (y - y2) - (y3 - y2) * (x - x2)) >= 0 && ((x1 - x3) * (y - y3) - (y1 - y3) * (x - x3)) >= 0) {
+                    // Set the pixel color
+                    int index = (y * image.width + x) * 4;
+                    image.data[index] = color.r;
+                    image.data[index + 1] = color.g;
+                    image.data[index + 2] = color.b;
+                    image.data[index + 3] = color.alpha; // Alpha channel
+
+                }
+            }
+        }
+    }
+
 
     std::vector<Pixel> displacePixels(Image &image, uint32_t n) {
         std::cout << "displacing pixels by radius " << n << "\n";
@@ -1483,12 +1743,71 @@ namespace mvm {
         turtle(image.width / 2, image.height / 2, stepSize, image, iterations, color, stepSize * 2.5, fibFraction,
                drawingMode);
 
-        // std::cout << "dithering magic ....\n";
-        // Perform dithering on the image
-        // makeDitherFSRgb18bpp(image);
-
         std::cout << "writing file\n";
 
+        // Write the image to a file in PNG format
+        if (image.savePNG(filename)) {
+            std::cout << "Das Bild " << filename << " wurde erfolgreich gespeichert." << std::endl;
+        } else {
+            std::cout << "Fehler beim Speichern des Bildes: " << filename << std::endl;
+        }
+        return filename;
+    }
+
+    std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
+        std::cout << ">> effect poly\n";
+
+
+        const bool verbose = false;
+        const int drawingMode = 1;
+
+        std::string filename = config.path+fileNamePrefix;
+        std::string frameNumberString = fmt::format("{:0{}d}", videoFrame, 9);
+        filename += frameNumberString+".png";
+
+        if (fileExists(filename) && !(regenerate)) {
+            fmt::println("{} exists - skipping creature generation", filename);
+            return filename;
+        }
+        Image image(1000, 1000);
+        std::cout << "allocated " << image.data.size() / (1024 * 1024) << "MB Ram for Image\n";
+        std::cout << "generating RGBA image\n";
+
+        Color color = {255, 255, 255, 255};
+        Color excludeColor = color;
+        std::cout << ">> effect poly ....\n";
+        std::cout << "width: " << image.width << "\n";
+        std::cout << "height: " << image.height << "\n";
+        std::cout << "effect resolution: " << resolution << "\n";
+
+
+        // generate resampled buffer
+        std::vector<float> samples (resolution);
+        size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+        size_t inputBufferOffset = (videoFrame-1) * samplesPerFrame;
+        dsp.resample(dsp.bands[0], samples, inputBufferOffset, dsp.sampleRate, resolution);
+        // store scaled signal in pixel vector
+        std::vector<Pixel> pixels;
+        int stepSize = image.width / resolution;
+        for (uint32_t i=0; i < resolution; i++) {
+            float r,g,b;
+            heatmap.getColorAtValue(std::abs(samples[i]), r, g, b);
+            Color color = { static_cast<unsigned char>(255 * r), static_cast<unsigned char>(255 * g), static_cast<unsigned char>(255 * b), 255};
+            Pixel samplePixel = { i * stepSize, image.height/2 + static_cast<int32_t>(samples[i]*499), color};
+            pixels.emplace_back(samplePixel);
+        }
+
+
+        // draw triangles
+        for (int i = 0; i < pixels.size(); i+=2) {
+            drawSolidTriangle(image, pixels[i].x, pixels[i].y, pixels[i+1].x, pixels[i+1].y, pixels[i+2].x, pixels[i+2].y,  pixels[i].color, pixels[i+1].color, pixels[i+2].color);
+        }
+
+        std::cout << "alpha 100% for all pixels ....\n";
+        image.setAlpha(255);
+
+
+        std::cout << "writing file\n";
 
         // Write the image to a file in PNG format
         if (image.savePNG(filename)) {
@@ -1676,6 +1995,59 @@ void test_squares() {
     ti.savePNG("!squares.png");
 }
 
+
+int example_walker2() {
+    float fc1 = 0.01f;      // Low-pass filter cutoff frequency
+    float fl = 0.1f;        // Mid-pass filter lower cutoff frequency
+    float fh = 0.5f;        // Mid-pass filter higher cutoff frequency
+    float fc2 = 0.5f;       // High-pass filter cutoff frequency
+
+    mvm::Config config;
+    config.path="/Users/ulli/Documents/mvm/";
+
+    mvm::Dsp dsp( config,25);
+    if (dsp.loadAudio("shona.ogg")) {
+        dsp.generateDefaultBands(fc1, fl, fh, fc2);
+        // dsp.generateVuMeters(25);
+        // dsp.saveToWav("shona_b0.wav", dsp.bands[0], dsp.sampleRate, 1);
+        // dsp.saveToWav("shona_b1.wav", dsp.bands[1], dsp.sampleRate, 1);
+        // dsp.saveToWav("shona_b2.wav", dsp.bands[2], dsp.sampleRate, 1);
+    }
+
+    size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+    uint32_t framesToGenerate = dsp.bands[0].size() / samplesPerFrame;
+
+    float average = dsp.absAverage(dsp.bands[0], 0, samplesPerFrame);
+
+    std::string img1, img2 = mvm::walker(config,average);
+    std::string imgInterpolated = "mvm_anim_";
+    mvm::Color colorBackground = { 0, 0, 0, 255};
+    uint32_t frames = 100;
+    uint32_t startFrame = 1;
+
+    std::random_device rd;  // obtain a random seed from hardware
+    std::mt19937 gen(0);  // seed the generator so the sequence is predictable
+    std::uniform_int_distribution<> distr(1, 6);  // define  the range for frames generation
+    std::uniform_int_distribution<> distr_rotate(0, 1);  // define the rang for bool rotatee
+
+    // generate keyframe images based on the audio sample in the lowpass band
+
+    fmt::println("MVM - generating {:L} frames", framesToGenerate);
+    for (uint32_t i=0; i<framesToGenerate; i++) {
+        frames=distr(gen)*50;
+        bool rotate=distr_rotate(gen);
+        img1 = img2;
+        size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
+        average = dsp.absAverage(dsp.bands[0], sampleIndex, samplesPerFrame);
+        img2 = mvm::walker(config, average);
+        fmt::println("transition for frames {} to {}", startFrame, (startFrame+frames)-1);
+        mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
+        startFrame += frames;
+    }
+
+    return 0;
+}
+
 int main() {
     float fc1 = 0.01f;      // Low-pass filter cutoff frequency
     float fl = 0.1f;        // Mid-pass filter lower cutoff frequency
@@ -1697,9 +2069,17 @@ int main() {
     size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
     uint32_t framesToGenerate = dsp.bands[0].size() / samplesPerFrame;
 
-    float average = dsp.average(dsp.bands[0], 0, samplesPerFrame);
+    float average = dsp.absAverage(dsp.bands[0], 0, samplesPerFrame);
+    int fillThreshold = 80000;
+    size_t resolution = 33;
+    mvm::ColorGradient heatmap;
 
-    std::string img1, img2 = mvm::walker(config,average);
+    std::string img1, img2 = mvm::effectPoly(config, dsp, 0, resolution, "poly_", heatmap , true);
+    // return 0;
+   /* img2 = mvm::effectPoly(config, dsp, 1500, resolution, "poly_", fillThreshold, true);
+    img2 = mvm::effectPoly(config, dsp, 3000, resolution, "poly_", fillThreshold, true);
+    img2 = mvm::effectPoly(config, dsp, 5000, resolution, "poly_", fillThreshold, true);*/
+
     std::string imgInterpolated = "mvm_anim_";
     mvm::Color colorBackground = { 0, 0, 0, 255};
     uint32_t frames = 100;
@@ -1713,16 +2093,17 @@ int main() {
     // generate keyframe images based on the audio sample in the lowpass band
 
     fmt::println("MVM - generating {:L} frames", framesToGenerate);
-    for (uint32_t i=0; i<framesToGenerate; i++) {
-        frames=distr(gen)*50;
+    for (uint32_t i=2; i<framesToGenerate; i++) {
+        startFrame = i;
+        frames=1; // distr(gen)*50;
         bool rotate=distr_rotate(gen);
         img1 = img2;
-        size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
-        average = dsp.average(dsp.bands[0], sampleIndex, samplesPerFrame);
-        img2 = mvm::walker(config, average);
+        // size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
+        // average = dsp.absAverage(dsp.bands[0], sampleIndex, samplesPerFrame);
+        img2 = mvm::effectPoly(config, dsp, startFrame, resolution, "poly_", heatmap, false);
         fmt::println("transition for frames {} to {}", startFrame, (startFrame+frames)-1);
-        mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
-        startFrame += frames;
+        // mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
+
     }
 
     return 0;

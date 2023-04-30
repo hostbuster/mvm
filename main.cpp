@@ -20,7 +20,7 @@
 #include <locale>
 #include "sndfile.h"
 
-
+#include "Gist.h"
 
 // using namespace std;
 namespace mvm {
@@ -203,6 +203,7 @@ namespace mvm {
                 }
                 temp[s >> 1] = sum / channels;
             }
+            bands[0] = temp;
             lowpassFilter(temp, bands[0], lowFc);
             // generate mid pass mono data
             fmt::println("DSP generating mid pass ...");
@@ -1289,7 +1290,6 @@ namespace mvm {
         }
     }
 
-
     std::vector<Pixel> displacePixels(Image &image, uint32_t n) {
         std::cout << "displacing pixels by radius " << n << "\n";
         std::random_device rd;  // obtain a random seed from hardware
@@ -1757,10 +1757,83 @@ namespace mvm {
     std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
         std::cout << ">> effect poly\n";
 
+        size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+        Gist<float> gist (samplesPerFrame, dsp.sampleRate);
+        // create audioframe from buffers
+        std::vector<float> audioFrame(samplesPerFrame);
+
+        size_t offset=(videoFrame-1)*samplesPerFrame;
+        for (size_t s=0; s < samplesPerFrame; s++) {
+            audioFrame[s] = dsp.bands[0][offset+s];
+        }
+        gist.processAudioFrame(audioFrame);
+
+        // Core Time Domain Features --------
+        // Root Mean Square (RMS)
+        float rms = gist.rootMeanSquare();
+
+        // Peak Energy
+        float peakEnergy = gist.peakEnergy();
+
+        // Zero Crossing rate
+        float zcr = gist.zeroCrossingRate();
+
+        // Core Frequency Domain Features
+
+        // Spectral Centroid
+        float specCent = gist.spectralCentroid();
+
+        // Spectral Crest
+        float specCrest = gist.spectralCrest();
+
+        // Spectral Flatness
+        float specFlat = gist.spectralFlatness();
+
+        // Spectral Rolloff
+        float specRolloff = gist.spectralRolloff();
+
+        // Spectral Kurtosis
+        float specKurtosis = gist.spectralKurtosis();
+
+
+        // Onset Detection Functions
+
+        // Energy difference
+        float ed = gist.energyDifference();
+
+        // Spectral difference
+        float sd = gist.spectralDifference();
+
+        // Spectral difference (half-wave rectified)
+        float sd_hwr = gist.spectralDifferenceHWR();
+
+        // Complex Spectral Difference
+        float csd = gist.complexSpectralDifference();
+
+        // High Frequency Content
+        float hfc = gist.highFrequencyContent();
+
+
+        // FFT Magnitude Spectrum
+        const std::vector<float>& magSpec = gist.getMagnitudeSpectrum();
+        float magSmax = 0;
+        for (const auto &s: magSpec) {
+            magSmax = std::max(magSmax, s);
+        };
+        fmt::println("mag {} ", magSmax);
+
+        // Pitch Estimation
+        float pitch = gist.pitch();
+        // Mel-frequency Representations
+        // Mel-frequency Spectrum
+        // const std::vector<float>& melSpec = gist.getMelFrequencySpectrum();
+
+        // MFCCs
+        // const std::vector<float>& mfcc = gist.getMelFrequencyCepstralCoefficients();
 
         const bool verbose = false;
         const int drawingMode = 1;
-
+        fmt::println("rms {} pitch {}", rms, pitch);
         std::string filename = config.path+fileNamePrefix;
         std::string frameNumberString = fmt::format("{:0{}d}", videoFrame, 9);
         filename += frameNumberString+".png";
@@ -1783,7 +1856,7 @@ namespace mvm {
 
         // generate resampled buffer
         std::vector<float> samples (resolution);
-        size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
+
         size_t inputBufferOffset = (videoFrame-1) * samplesPerFrame;
         dsp.resample(dsp.bands[0], samples, inputBufferOffset, dsp.sampleRate, resolution);
         // store scaled signal in pixel vector
@@ -1802,6 +1875,18 @@ namespace mvm {
         for (int i = 0; i < pixels.size(); i+=2) {
             drawSolidTriangle(image, pixels[i].x, pixels[i].y, pixels[i+1].x, pixels[i+1].y, pixels[i+2].x, pixels[i+2].y,  pixels[i].color, pixels[i+1].color, pixels[i+2].color);
         }
+
+        // draw magnitude spectrum
+
+        int x=0;
+        float scaleY = 499/magSmax;
+
+        for (const auto &s: magSpec) {
+            float y1 = 500;
+            float y2 = y1 - (s * scaleY);
+            drawLine(image, x, y1,x, y2, excludeColor);
+            x++;
+        };
 
         std::cout << "alpha 100% for all pixels ....\n";
         image.setAlpha(255);

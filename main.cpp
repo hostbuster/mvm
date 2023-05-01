@@ -1141,7 +1141,49 @@ namespace mvm {
         return pixelsFilled;
     }
 
-    void drawLine(Image &image, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, Color color, uint32_t threshold_manhattan_length = 0) {
+
+    inline void drawLineGradient(Image &image, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, ColorGradient &gradient, float gradientEnd, unsigned char alpha = 255) {
+
+        int dx = std::abs((int)(x2 - x1));
+        int dy = std::abs((int)(y2 - y1));
+        int sx = (x1 < x2) ? 1 : -1;
+        int sy = (y1 < y2) ? 1 : -1;
+        int err = dx - dy;
+
+        int xs = x1;
+        int ys = y1;
+        float distance = std::sqrt(dx*dx + dy*dy);
+        gradientEnd = std::clamp(gradientEnd, 0.0f, 1.0f);
+        while (true) {
+            // get distance to current pixel
+            int dcx = std::abs((int)(xs - x1));
+            int dcy = std::abs((int)(ys - y1));
+            float currentDistance = std::sqrt(dcx*dcx + dcy*dcy);
+            float fraction = (currentDistance / distance) * gradientEnd;
+            float r,g,b;
+            gradient.getColorAtValue(fraction, r, g, b);
+            Color color = { static_cast<unsigned char>(255 * r), static_cast<unsigned char>(255 * g), static_cast<unsigned char>(255 * b), alpha};
+            setPixel(image, x1, y1, color);
+
+            if (x1 == x2 && y1 == y2) {
+                break;
+            }
+
+            int e2 = 2 * err;
+
+            if (e2 > -dy) {
+                err -= dy;
+                x1 += sx;
+            }
+
+            if (e2 < dx) {
+                err += dx;
+                y1 += sy;
+            }
+        }
+    }
+
+    inline void drawLine(Image &image, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, Color color, uint32_t threshold_manhattan_length = 0) {
 
         int dx = std::abs((int)(x2 - x1));
         int dy = std::abs((int)(y2 - y1));
@@ -1886,7 +1928,8 @@ namespace mvm {
             double mag_dB = 20 * log10(s + eps);
             double y = (mag_dB - min_mag_dB) / (max_mag_dB - min_mag_dB) * (max_y - min_y) + min_y;
             float y2 = y1 - y;
-            drawLine(image, x, y1,x, y2, excludeColor);
+            float endFactor = (float)y / (max_y - min_y);
+            drawLineGradient(image, x, y1,x, y2, heatmap, endFactor);
             x++;
         };
 

@@ -1200,7 +1200,7 @@ namespace mvm {
         drawLine(image, x1m, y1, x2m, y2, color, threshold_manhattan_length);
         drawLine(image, x1m, y1m, x2m, y2m, color, threshold_manhattan_length);
     }
-    void normalizeTrianglePoints(int& x1, int& y1, int& x2, int& y2, int& x3, int& y3) {
+    inline void normalizeTrianglePoints(int& x1, int& y1, int& x2, int& y2, int& x3, int& y3) {
         // Compute the cross product of the vectors (x2-x1,y2-y1) and (x3-x1,y3-y1)
         int crossProduct = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
 
@@ -1211,8 +1211,9 @@ namespace mvm {
         }
     }
 
-    bool normalizeTriangle(size_t width, size_t height, int x1, int y1, int x2, int y2, int x3, int y3, int &lx, int &hx, int &ly, int &hy)
+    inline bool normalizeTriangle(size_t width, size_t height, int x1, int y1, int x2, int y2, int x3, int y3, int &lx, int &hx, int &ly, int &hy)
     {
+        normalizeTrianglePoints(x1, y1, x2, y2, x3, y3);
         lx = x1;
         hx = x1;
         if (lx > x2) lx = x2;
@@ -1245,14 +1246,17 @@ namespace mvm {
         int lx, hx, ly, hy;
         if (normalizeTriangle(image.width, image.height, x1, y1, x2, y2, x3, y3, lx, hx, ly, hy)) {
             Color color;
+            // fmt::println("{},{},{},{},{},{} - {},{},{},{}", x1,y1,x2,y2,x3,y3,lx,ly,hx,hy);
             for (int y = ly; y <= hy; ++y) {
+                bool hasEntered = false;
                 for (int x = lx; x <= hx; ++x) {
                     int u1, u2, det;
                     if (barycentric(x1, y1, x2, y2, x3, y3, x, y, u1, u2, det)) {
+                        hasEntered = true;
                         color = getPixel(image, x, y);
                         blendColor(color, mixColors(c1, c2, c3, u1, u2, det));
                         setPixel(image, x, y, color);
-                    }
+                    } else if (hasEntered) break;
                 }
             }
         }
@@ -1754,13 +1758,11 @@ namespace mvm {
         return filename;
     }
 
-    std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
+    std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, std::vector<float> &audioFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
         std::cout << ">> effect poly\n";
 
         size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
         Gist<float> gist (samplesPerFrame, dsp.sampleRate);
-        // create audioframe from buffers
-        std::vector<float> audioFrame(samplesPerFrame);
 
         size_t offset=(videoFrame-1)*samplesPerFrame;
         for (size_t s=0; s < samplesPerFrame; s++) {
@@ -1816,11 +1818,7 @@ namespace mvm {
 
         // FFT Magnitude Spectrum
         const std::vector<float>& magSpec = gist.getMagnitudeSpectrum();
-        float magSmax = 0;
-        for (const auto &s: magSpec) {
-            magSmax = std::max(magSmax, s);
-        };
-        fmt::println("mag {} ", magSmax);
+
 
         // Pitch Estimation
         float pitch = gist.pitch();
@@ -1855,14 +1853,14 @@ namespace mvm {
 
 
         // generate resampled buffer
-        std::vector<float> samples (resolution);
+        std::vector<float> samples (resolution+1);
 
         size_t inputBufferOffset = (videoFrame-1) * samplesPerFrame;
-        dsp.resample(dsp.bands[0], samples, inputBufferOffset, dsp.sampleRate, resolution);
+        dsp.resample(dsp.bands[0], samples, inputBufferOffset, dsp.sampleRate, samples.size());
         // store scaled signal in pixel vector
         std::vector<Pixel> pixels;
         int stepSize = image.width / resolution;
-        for (uint32_t i=0; i < resolution; i++) {
+        for (uint32_t i=0; i < samples.size(); i++) {
             float r,g,b;
             heatmap.getColorAtValue(std::abs(samples[i]), r, g, b);
             Color color = { static_cast<unsigned char>(255 * r), static_cast<unsigned char>(255 * g), static_cast<unsigned char>(255 * b), 255};
@@ -1871,19 +1869,23 @@ namespace mvm {
         }
 
 
-        // draw triangles
-        for (int i = 0; i < pixels.size(); i+=2) {
+        // draw triangles of the pseudo waveform
+        for (int i = 0; i < pixels.size()-2; i+=2) {
             drawSolidTriangle(image, pixels[i].x, pixels[i].y, pixels[i+1].x, pixels[i+1].y, pixels[i+2].x, pixels[i+2].y,  pixels[i].color, pixels[i+1].color, pixels[i+2].color);
         }
 
-        // draw magnitude spectrum
-
+        // draw magnitude spectrum on a log10 graph
         int x=0;
-        float scaleY = 499/magSmax;
-
+        float eps = std::numeric_limits<float>::epsilon();
+        float min_mag_dB = 20 * log10(eps);
+        float max_mag_dB= 20 * log10(magSpec.size());
+        float max_y = 300;
+        float min_y = 1;
+        float y1 = 999;
         for (const auto &s: magSpec) {
-            float y1 = 500;
-            float y2 = y1 - (s * scaleY);
+            double mag_dB = 20 * log10(s + eps);
+            double y = (mag_dB - min_mag_dB) / (max_mag_dB - min_mag_dB) * (max_y - min_y) + min_y;
+            float y2 = y1 - y;
             drawLine(image, x, y1,x, y2, excludeColor);
             x++;
         };
@@ -2158,8 +2160,9 @@ int main() {
     int fillThreshold = 80000;
     size_t resolution = 33;
     mvm::ColorGradient heatmap;
-
-    std::string img1, img2 = mvm::effectPoly(config, dsp, 0, resolution, "poly_", heatmap , true);
+    // create a buffer to store the audio data
+    std::vector<float> audioFrame(samplesPerFrame);
+    std::string img1, img2 = mvm::effectPoly(config, dsp, 0, audioFrame, resolution, "poly_", heatmap , true);
     // return 0;
    /* img2 = mvm::effectPoly(config, dsp, 1500, resolution, "poly_", fillThreshold, true);
     img2 = mvm::effectPoly(config, dsp, 3000, resolution, "poly_", fillThreshold, true);
@@ -2185,7 +2188,7 @@ int main() {
         img1 = img2;
         // size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
         // average = dsp.absAverage(dsp.bands[0], sampleIndex, samplesPerFrame);
-        img2 = mvm::effectPoly(config, dsp, startFrame, resolution, "poly_", heatmap, false);
+        img2 = mvm::effectPoly(config, dsp, startFrame, audioFrame, resolution, "poly_", heatmap, true);
         fmt::println("transition for frames {} to {}", startFrame, (startFrame+frames)-1);
         // mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
 

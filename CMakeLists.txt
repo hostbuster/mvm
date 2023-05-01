@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(untitled)
+project(mvm)
 
 set(CMAKE_CXX_STANDARD 17)
 SET(CMAKE_BUILD_TYPE Debug)
@@ -14,7 +14,6 @@ find_package(PNG REQUIRED)
 find_library(SNDFILE_LIBRARIES NAMES sndfile)
 
 add_library(kiss_fft STATIC include/Gist/libs/kiss_fft130/kiss_fft.c include/Gist/libs/kiss_fft130/kiss_fft.h)
-# target_include_directories(kiss_fft PUBLIC libs/kiss_fft)
 
 
 # Check if libsndfile was found
@@ -23,10 +22,10 @@ if(NOT SNDFILE_LIBRARIES)
 endif()
 
 
-add_executable(untitled main.cpp)
-target_link_libraries(untitled ${PNG_LIBRARY} ${SNDFILE_LIBRARIES} fmt::fmt-header-only Gist kiss_fft)
+add_executable(mvm main.cpp)
+target_link_libraries(mvm ${PNG_LIBRARY} ${SNDFILE_LIBRARIES} fmt::fmt-header-only Gist kiss_fft)
 
-target_include_directories(untitled PRIVATE
+target_include_directories(mvm PRIVATE
         ${PROJECT_SOURCE_DIR}/include/fmt/include
         ${PROJECT_SOURCE_DIR}/include/libsndfile
         ${PROJECT_SOURCE_DIR}/include/Gist/src

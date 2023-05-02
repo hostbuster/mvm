@@ -1,7 +1,7 @@
 /*
  * maximal visual madness - call me after dark
  *
- ffmpeg -framerate 25 -pattern_type glob -i 'mvm_anim_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p walker2_anim__.mp4
+ ffmpeg -framerate 25 -pattern_type glob -i 'poly_*.png' -i 'shona.ogg' -c:v libx264 -c:a copy -shortest -r 30 -pix_fmt yuv420p mvm_anim__.mp4
  *
  */
 
@@ -24,6 +24,69 @@
 
 // using namespace std;
 namespace mvm {
+
+    // --- timing & benchmark functions ---
+
+    char* FormatBytes(float bytes, char *str)
+    {
+        float tb = 1099511627776;
+        float gb = 1073741824;
+        float mb = 1048576;
+        float kb = 1024;
+
+        if (bytes >= tb)
+            sprintf(str, "%.2f TB", (float)bytes / tb);
+        else if (bytes >= gb && bytes < tb)
+            sprintf(str, "%.2f GB", (float)bytes / gb);
+        else if (bytes >= mb && bytes < gb)
+            sprintf(str, "%.2f MB", (float)bytes / mb);
+        else if (bytes >= kb && bytes < mb)
+            sprintf(str, "%.2f KB", (float)bytes / kb);
+        else if (bytes < kb)
+            sprintf(str, "%.2f Bytes", bytes);
+        else
+            sprintf(str, "%.2f Bytes", bytes);
+
+        return str;
+    }
+
+    std::string eta(size_t items_done, size_t items_total, size_t seconds_elapsed) {
+        if (items_done==0) return "~";
+        int input_seconds=((double)seconds_elapsed/items_done)*items_total;
+        int days = input_seconds / 60 / 60 / 24;
+        int hours = (input_seconds / 60 / 60) % 24;
+        int minutes = (input_seconds / 60) % 60;
+        int seconds = input_seconds % 60;
+        std::string eta=std::to_string(days)+"d "+std::to_string(hours)+"h "+std::to_string(minutes)+"m "+std::to_string(seconds)+"s";
+        return eta;
+    }
+
+    std::string timeElapsed(size_t items_done, size_t seconds_elapsed) {
+        if (items_done==0) return "~";
+        int input_seconds=(double)seconds_elapsed;
+        int days = input_seconds / 60 / 60 / 24;
+        int hours = (input_seconds / 60 / 60) % 24;
+        int minutes = (input_seconds / 60) % 60;
+        int seconds = input_seconds % 60;
+        std::string elapsed=std::to_string(days)+"d "+std::to_string(hours)+"h "+std::to_string(minutes)+"m "+std::to_string(seconds)+"s";
+        return elapsed;
+    }
+
+    void showEta(size_t items_done, size_t items_total, const std::chrono::steady_clock::time_point time_start, size_t bytes_read) {
+        std::chrono::steady_clock::time_point time_now = std::chrono::steady_clock::now();
+        int seconds=std::chrono::duration_cast<std::chrono::seconds>(time_now - time_start).count();
+        std::cout << " RUNTIME: " << timeElapsed(items_done, seconds) << " ::: ETA: " << eta(items_done, items_total, seconds );
+        if (bytes_read!=0) {
+            // read times
+            char s[255] = "";
+            FormatBytes(bytes_read, s);
+            std::cout << " ::: " << s << " | ";
+            float bytes_read_second = (float)bytes_read / seconds;
+            FormatBytes(bytes_read_second, s);
+            std::cout << s << "/s :::";
+        }
+    }
+
     template <typename T> int sgn(T x) {
         //return (T(0) < val) - (val < T(0));
         return ((T)((x) > 0) - (T)((x) < 0));
@@ -157,9 +220,9 @@ namespace mvm {
             channels = sfinfo.channels;
             samplesPerChannel = sfinfo.frames;
             std::locale current_locale("");
-            auto sampleRateStr = fmt::format(std::locale(current_locale.name()), "{:L}", sampleRate);
+            auto sampleRateStr = fmt::format(std::locale("en_US.UTF-8"), "{:L}", sampleRate);
             auto samplesPerChannelStr = fmt::format(std::locale("en_US.UTF-8"), "{:L}", samplesPerChannel);
-            fmt::println("DSP loading {}: {} samples/s, {} channels, {:10L} total samples", filename, sampleRateStr, channels, samplesPerChannel);
+            fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRateStr, channels, samplesPerChannelStr);
 
             pcmData.resize(sfinfo.frames * sfinfo.channels);
             sf_readf_float(sndfile, pcmData.data(), sfinfo.frames);
@@ -487,6 +550,17 @@ namespace mvm {
         Config config;
     };
 
+    bool isFileEmpty(const std::string& filename) {
+        std::filesystem::path filePath(filename);
+        std::error_code ec;
+        std::uintmax_t fileSize = std::filesystem::file_size(filePath, ec);
+        if (ec) {
+            // handle the error
+            // for example, throw an exception or return -1
+            return true;
+        }
+        return (fileSize == 0);
+    }
 
     bool fileExists(const std::string &filename) {
         return std::filesystem::exists(filename);
@@ -1690,7 +1764,8 @@ namespace mvm {
         filename += "D" + std::to_string(drawingMode);
         filename += ".png";
 
-        if (fileExists(filename) && !(regenerate)) {
+        // check if the file needs to be generated
+        if (fileExists(filename) && !(isFileEmpty(filename)) && !(regenerate)) {
             fmt::println("{} exists - skipping creature generation", filename);
             return filename;
         }
@@ -1801,7 +1876,19 @@ namespace mvm {
     }
 
     std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, std::vector<float> &audioFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
-        std::cout << ">> effect poly\n";
+        const bool verbose = false;
+        if (verbose) std::cout << ">> effect poly\n";
+        std::string filename = config.path+fileNamePrefix;
+        std::string frameNumberString = fmt::format("{:0{}d}", videoFrame, 9);
+        filename += frameNumberString+".png";
+
+        // check if the file needs to be generated
+        bool fExists = fileExists(filename);
+        bool fEmpty = isFileEmpty(filename);
+        if ( fExists && !fEmpty && !(regenerate)) {
+            fmt::println("{} exists - skipping generation", filename);
+            return filename;
+        }
 
         size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
         Gist<float> gist (samplesPerFrame, dsp.sampleRate);
@@ -1871,27 +1958,20 @@ namespace mvm {
         // MFCCs
         // const std::vector<float>& mfcc = gist.getMelFrequencyCepstralCoefficients();
 
-        const bool verbose = false;
-        const int drawingMode = 1;
-        fmt::println("rms {} pitch {}", rms, pitch);
-        std::string filename = config.path+fileNamePrefix;
-        std::string frameNumberString = fmt::format("{:0{}d}", videoFrame, 9);
-        filename += frameNumberString+".png";
 
-        if (fileExists(filename) && !(regenerate)) {
-            fmt::println("{} exists - skipping creature generation", filename);
-            return filename;
-        }
+        const int drawingMode = 1;
+        // fmt::println("rms {} pitch {}", rms, pitch);
+
         Image image(1000, 1000);
-        std::cout << "allocated " << image.data.size() / (1024 * 1024) << "MB Ram for Image\n";
-        std::cout << "generating RGBA image\n";
+        if (verbose) std::cout << "allocated " << image.data.size() / (1024 * 1024) << "MB Ram for Image\n";
+        if (verbose) std::cout << "generating RGBA image\n";
 
         Color color = {255, 255, 255, 255};
         Color excludeColor = color;
-        std::cout << ">> effect poly ....\n";
-        std::cout << "width: " << image.width << "\n";
-        std::cout << "height: " << image.height << "\n";
-        std::cout << "effect resolution: " << resolution << "\n";
+        if (verbose) std::cout << ">> effect poly ....\n";
+        if (verbose) std::cout << "width: " << image.width << "\n";
+        if (verbose) std::cout << "height: " << image.height << "\n";
+        if (verbose)  std::cout << "effect resolution: " << resolution << "\n";
 
 
         // generate resampled buffer
@@ -1933,17 +2013,16 @@ namespace mvm {
             x++;
         };
 
-        std::cout << "alpha 100% for all pixels ....\n";
+        if (verbose)  std::cout << "alpha 100% for all pixels ....\n";
         image.setAlpha(255);
 
-
-        std::cout << "writing file\n";
+        if (verbose)  std::cout << "writing file\n";
 
         // Write the image to a file in PNG format
         if (image.savePNG(filename)) {
-            std::cout << "Das Bild " << filename << " wurde erfolgreich gespeichert." << std::endl;
+            if (verbose) std::cout << "Image " << filename << " created." << std::endl;
         } else {
-            std::cout << "Fehler beim Speichern des Bildes: " << filename << std::endl;
+            std::cerr << "Error saving image: " << filename << std::endl;
         }
         return filename;
     }
@@ -1969,7 +2048,7 @@ namespace mvm {
             size_t frameNumber = startFrame + s;
             std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
             fileOut += frameNumberString + ".png";
-            if (fileExists(fileOut)) {
+            if (fileExists(fileOut) && !(isFileEmpty(fileOut))) {
                 fmt::println("block for {} detected", fileOut);
                 return 0;
             }
@@ -2186,55 +2265,37 @@ int main() {
 
     mvm::Config config;
     config.path="/Users/ulli/Documents/mvm/";
+    std::string audioFileName ="shona.ogg";
+    std::string videoFramePrefix = "poly_";
 
     mvm::Dsp dsp( config,25);
-    if (dsp.loadAudio("shona.ogg")) {
+    if (dsp.loadAudio(audioFileName)) {
         dsp.generateDefaultBands(fc1, fl, fh, fc2);
-        // dsp.generateVuMeters(25);
-        // dsp.saveToWav("shona_b0.wav", dsp.bands[0], dsp.sampleRate, 1);
-        // dsp.saveToWav("shona_b1.wav", dsp.bands[1], dsp.sampleRate, 1);
-        // dsp.saveToWav("shona_b2.wav", dsp.bands[2], dsp.sampleRate, 1);
     }
 
     size_t samplesPerFrame = dsp.sampleRate / dsp.framesPerSecond;
     uint32_t framesToGenerate = dsp.bands[0].size() / samplesPerFrame;
 
-    float average = dsp.absAverage(dsp.bands[0], 0, samplesPerFrame);
-    int fillThreshold = 80000;
     size_t resolution = 33;
+
+    // create a gradient
     mvm::ColorGradient heatmap;
-    // create a buffer to store the audio data
+    // create a buffer to store the audio data for the duration of one videoFrame
     std::vector<float> audioFrame(samplesPerFrame);
-    std::string img1, img2 = mvm::effectPoly(config, dsp, 0, audioFrame, resolution, "poly_", heatmap , true);
+
+    // generate frames based on the audio samples in the mono conversion
+    fmt::println("MVM - generating {:L} video frames", framesToGenerate);
+    // std::string img1 = mvm::effectPoly(config, dsp, 143, audioFrame, resolution, videoFramePrefix, heatmap, false);
     // return 0;
-   /* img2 = mvm::effectPoly(config, dsp, 1500, resolution, "poly_", fillThreshold, true);
-    img2 = mvm::effectPoly(config, dsp, 3000, resolution, "poly_", fillThreshold, true);
-    img2 = mvm::effectPoly(config, dsp, 5000, resolution, "poly_", fillThreshold, true);*/
 
-    std::string imgInterpolated = "mvm_anim_";
-    mvm::Color colorBackground = { 0, 0, 0, 255};
-    uint32_t frames = 100;
-    uint32_t startFrame = 1;
-
-    std::random_device rd;  // obtain a random seed from hardware
-    std::mt19937 gen(0);  // seed the generator so the sequence is predictable
-    std::uniform_int_distribution<> distr(1, 6);  // define  the range for frames generation
-    std::uniform_int_distribution<> distr_rotate(0, 1);  // define the rang for bool rotatee
-
-    // generate keyframe images based on the audio sample in the lowpass band
-
-    fmt::println("MVM - generating {:L} frames", framesToGenerate);
-    for (uint32_t i=2; i<framesToGenerate; i++) {
-        startFrame = i;
-        frames=1; // distr(gen)*50;
-        bool rotate=distr_rotate(gen);
-        img1 = img2;
-        // size_t sampleIndex = std::min(samplesPerFrame*(startFrame-1)+((frames-1)*samplesPerFrame), dsp.samplesPerChannel);
-        // average = dsp.absAverage(dsp.bands[0], sampleIndex, samplesPerFrame);
-        img2 = mvm::effectPoly(config, dsp, startFrame, audioFrame, resolution, "poly_", heatmap, true);
-        fmt::println("transition for frames {} to {}", startFrame, (startFrame+frames)-1);
-        // mvm::interpolate(config, dsp, img1, img2, imgInterpolated, frames, startFrame, colorBackground, rotate);
-
+    std::chrono::steady_clock::time_point timeStart = std::chrono::steady_clock::now();
+    size_t bytesProcessed = 0;
+    for (size_t frame=1; frame < framesToGenerate; frame++) {
+        std::string img1 = mvm::effectPoly(config, dsp, frame, audioFrame, resolution, videoFramePrefix, heatmap, false);
+        bytesProcessed+=1000*1000*4;
+        fmt::print("::: {} / {} :::", frame, framesToGenerate);
+        mvm::showEta(frame, framesToGenerate, timeStart, bytesProcessed);
+        fmt::println("");
     }
 
     return 0;

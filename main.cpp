@@ -27,37 +27,34 @@ namespace mvm {
 
     // --- timing & benchmark functions ---
 
-    char* FormatBytes(float bytes, char *str)
+    std::string formatBytes(size_t bytes)
     {
-        float tb = 1099511627776;
-        float gb = 1073741824;
-        float mb = 1048576;
-        float kb = 1024;
-
+        const float tb = 1099511627776;
+        const float gb = 1073741824;
+        const float mb = 1048576;
+        const float kb = 1024;
+        std::string converted;
         if (bytes >= tb)
-            sprintf(str, "%.2f TB", (float)bytes / tb);
+            converted = fmt::format("{:.2f} TB", (float)bytes / tb);
         else if (bytes >= gb && bytes < tb)
-            sprintf(str, "%.2f GB", (float)bytes / gb);
+            converted = fmt::format("{:.2f} GB", (float)bytes / gb);
         else if (bytes >= mb && bytes < gb)
-            sprintf(str, "%.2f MB", (float)bytes / mb);
+            converted = fmt::format("{:.2f} MB", (float)bytes / mb);
         else if (bytes >= kb && bytes < mb)
-            sprintf(str, "%.2f KB", (float)bytes / kb);
+            converted = fmt::format("{:.2f} KB", (float)bytes / kb);
         else if (bytes < kb)
-            sprintf(str, "%.2f Bytes", bytes);
-        else
-            sprintf(str, "%.2f Bytes", bytes);
-
-        return str;
+            converted = fmt::format("{} Bytes", bytes);
+        return converted;
     }
 
-    std::string eta(size_t items_done, size_t items_total, size_t seconds_elapsed) {
+    std::string timeToFinish(size_t items_done, size_t items_total, size_t seconds_elapsed) {
         if (items_done==0) return "~";
         int input_seconds=((double)seconds_elapsed/items_done)*items_total;
         int days = input_seconds / 60 / 60 / 24;
         int hours = (input_seconds / 60 / 60) % 24;
         int minutes = (input_seconds / 60) % 60;
         int seconds = input_seconds % 60;
-        std::string eta=std::to_string(days)+"d "+std::to_string(hours)+"h "+std::to_string(minutes)+"m "+std::to_string(seconds)+"s";
+        std::string eta=fmt::format("{}d {}h {}m {}s", days, hours ,minutes, seconds);
         return eta;
     }
 
@@ -68,23 +65,23 @@ namespace mvm {
         int hours = (input_seconds / 60 / 60) % 24;
         int minutes = (input_seconds / 60) % 60;
         int seconds = input_seconds % 60;
-        std::string elapsed=std::to_string(days)+"d "+std::to_string(hours)+"h "+std::to_string(minutes)+"m "+std::to_string(seconds)+"s";
+        std::string elapsed=fmt::format("{}d {}h {}m {}s", days, hours ,minutes, seconds);
         return elapsed;
     }
 
-    void showEta(size_t items_done, size_t items_total, const std::chrono::steady_clock::time_point time_start, size_t bytes_read) {
+    std::string formatEta(size_t items_done, size_t items_total, const std::chrono::steady_clock::time_point time_start, size_t bytes_read) {
         std::chrono::steady_clock::time_point time_now = std::chrono::steady_clock::now();
         int seconds=std::chrono::duration_cast<std::chrono::seconds>(time_now - time_start).count();
-        std::cout << " RUNTIME: " << timeElapsed(items_done, seconds) << " ::: ETA: " << eta(items_done, items_total, seconds );
+        std::string formated = fmt::format("RUNTIME: {} ::: ETA {} :::", timeElapsed(items_done, seconds),
+                                           timeToFinish(items_done, items_total, seconds));
         if (bytes_read!=0) {
             // read times
-            char s[255] = "";
-            FormatBytes(bytes_read, s);
-            std::cout << " ::: " << s << " | ";
-            float bytes_read_second = (float)bytes_read / seconds;
-            FormatBytes(bytes_read_second, s);
-            std::cout << s << "/s :::";
+            float bytes_read_second;
+            if (seconds>0) bytes_read_second = (float)bytes_read / seconds;
+            else bytes_read_second = bytes_read;
+            formated+= " " + formatBytes(bytes_read) + " ::: " + formatBytes(bytes_read_second) + "/s :::";
         }
+        return formated;
     }
 
     template <typename T> int sgn(T x) {
@@ -2265,8 +2262,8 @@ int main() {
 
     mvm::Config config;
     config.path="/Users/ulli/Documents/mvm/";
-    std::string audioFileName ="shona.ogg";
-    std::string videoFramePrefix = "poly_";
+    std::string audioFileName ="super8.mp3";
+    std::string videoFramePrefix = "super8_";
 
     mvm::Dsp dsp( config,25);
     if (dsp.loadAudio(audioFileName)) {
@@ -2293,9 +2290,9 @@ int main() {
     for (size_t frame=1; frame < framesToGenerate; frame++) {
         std::string img1 = mvm::effectPoly(config, dsp, frame, audioFrame, resolution, videoFramePrefix, heatmap, false);
         bytesProcessed+=1000*1000*4;
-        fmt::print("::: {} / {} :::", frame, framesToGenerate);
-        mvm::showEta(frame, framesToGenerate, timeStart, bytesProcessed);
-        fmt::println("");
+        std::string progress = fmt::format("::: {} / {} :::", frame, framesToGenerate);
+        std::string etaStr = mvm::formatEta(frame, framesToGenerate, timeStart, bytesProcessed);
+        fmt::println("{} {}", progress, etaStr);
     }
 
     return 0;

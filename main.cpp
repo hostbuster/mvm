@@ -20,7 +20,12 @@
 #include <locale>
 #include "sndfile.h"
 
+#ifndef MVM_NO_GIST
 #include "Gist.h"
+#endif
+#include <filesystem>
+#include <cctype>
+#include <thread>
 
 // using namespace std;
 namespace mvm {
@@ -194,6 +199,7 @@ namespace mvm {
     class Config {
     public:
         std::string path;
+        size_t threads = 1;
     };
 
     class Dsp {
@@ -216,9 +222,8 @@ namespace mvm {
             sampleRate = sfinfo.samplerate;
             channels = sfinfo.channels;
             samplesPerChannel = sfinfo.frames;
-            std::locale current_locale("");
-            auto sampleRateStr = fmt::format(std::locale("en_US.UTF-8"), "{:L}", sampleRate);
-            auto samplesPerChannelStr = fmt::format(std::locale("en_US.UTF-8"), "{:L}", samplesPerChannel);
+            auto sampleRateStr = fmt::format("{}", sampleRate);
+            auto samplesPerChannelStr = fmt::format("{}", samplesPerChannel);
             fmt::println("DSP loading {}: {} samples/s, {} channels, {} total samples", filename, sampleRateStr, channels, samplesPerChannelStr);
 
             pcmData.resize(sfinfo.frames * sfinfo.channels);
@@ -563,6 +568,27 @@ namespace mvm {
         return std::filesystem::exists(filename);
     }
 
+    std::vector<std::string> listImagesSorted(const std::string &directoryPath)
+    {
+        std::vector<std::string> files;
+        std::error_code ec;
+        if (!std::filesystem::exists(directoryPath, ec) || !std::filesystem::is_directory(directoryPath, ec)) {
+            return files;
+        }
+        const std::vector<std::string> allowedExtensions = { ".png" };
+        for (const auto &entry : std::filesystem::directory_iterator(directoryPath)) {
+            if (!entry.is_regular_file(ec)) continue;
+            auto path = entry.path();
+            auto ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (std::find(allowedExtensions.begin(), allowedExtensions.end(), ext) != allowedExtensions.end()) {
+                files.emplace_back(path.string());
+            }
+        }
+        std::sort(files.begin(), files.end());
+        return files;
+    }
+
     struct Color {
         unsigned char r;
         unsigned char g;
@@ -756,11 +782,28 @@ namespace mvm {
             png_byte color_type = png_get_color_type(png_ptr, info_ptr);
             png_byte bit_depth = png_get_bit_depth(png_ptr, info_ptr);
 
-            if (color_type != PNG_COLOR_TYPE_RGBA || bit_depth != 8) {
-                png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-                fclose(fp);
-                throw std::runtime_error("Error loading PNG: unsupported color type or bit depth.");
+            // Normalize any PNG to 8-bit RGBA
+            if (bit_depth == 16) {
+                png_set_strip_16(png_ptr);
             }
+            if (color_type == PNG_COLOR_TYPE_PALETTE) {
+                png_set_palette_to_rgb(png_ptr);
+            }
+            if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
+                png_set_expand_gray_1_2_4_to_8(png_ptr);
+            }
+            // Handle transparency chunk
+            if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) {
+                png_set_tRNS_to_alpha(png_ptr);
+            }
+            // Ensure we end up with RGBA
+            if (color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_PALETTE) {
+                png_set_filler(png_ptr, 0xFF, PNG_FILLER_AFTER);
+            }
+            if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
+                png_set_gray_to_rgb(png_ptr);
+            }
+            png_read_update_info(png_ptr, info_ptr);
             png_bytep *row_pointers = (png_bytep *) malloc(sizeof(png_bytep) * height);
             for (png_uint_32 y = 0; y < height; y++) {
                 row_pointers[y] = (png_byte *) malloc(png_get_rowbytes(png_ptr, info_ptr));
@@ -950,6 +993,84 @@ namespace mvm {
         }
     }
 
+    void gaussianBlurRGBA(Image &image, int threads) {
+        if (threads <= 1) { gaussianBlurRGBA(image); return; }
+        // Copy source data so reads are consistent across threads
+        std::vector<unsigned char> src = image.data;
+        const uint32_t width = image.width;
+        const uint32_t height = image.height;
+        auto worker = [&](uint32_t yStart, uint32_t yEnd) {
+            for (uint32_t y = std::max<uint32_t>(1, yStart); y < std::min<uint32_t>(height - 1, yEnd); ++y) {
+                for (uint32_t x = 1; x < width - 1; ++x) {
+                    float sumR = 0.f, sumG = 0.f, sumB = 0.f, sumA = 0.f;
+                    sumR += (1.f/16.f) * src[((y-1) * width + (x-1)) * 4 + 0];
+                    sumG += (1.f/16.f) * src[((y-1) * width + (x-1)) * 4 + 1];
+                    sumB += (1.f/16.f) * src[((y-1) * width + (x-1)) * 4 + 2];
+                    sumA += (1.f/16.f) * src[((y-1) * width + (x-1)) * 4 + 3];
+
+                    sumR += (2.f/16.f) * src[((y-1) * width + (x)) * 4 + 0];
+                    sumG += (2.f/16.f) * src[((y-1) * width + (x)) * 4 + 1];
+                    sumB += (2.f/16.f) * src[((y-1) * width + (x)) * 4 + 2];
+                    sumA += (2.f/16.f) * src[((y-1) * width + (x)) * 4 + 3];
+
+                    sumR += (1.f/16.f) * src[((y-1) * width + (x+1)) * 4 + 0];
+                    sumG += (1.f/16.f) * src[((y-1) * width + (x+1)) * 4 + 1];
+                    sumB += (1.f/16.f) * src[((y-1) * width + (x+1)) * 4 + 2];
+                    sumA += (1.f/16.f) * src[((y-1) * width + (x+1)) * 4 + 3];
+
+                    sumR += (2.f/16.f) * src[((y) * width + (x-1)) * 4 + 0];
+                    sumG += (2.f/16.f) * src[((y) * width + (x-1)) * 4 + 1];
+                    sumB += (2.f/16.f) * src[((y) * width + (x-1)) * 4 + 2];
+                    sumA += (2.f/16.f) * src[((y) * width + (x-1)) * 4 + 3];
+
+                    sumR += (4.f/16.f) * src[((y) * width + (x)) * 4 + 0];
+                    sumG += (4.f/16.f) * src[((y) * width + (x)) * 4 + 1];
+                    sumB += (4.f/16.f) * src[((y) * width + (x)) * 4 + 2];
+                    sumA += (4.f/16.f) * src[((y) * width + (x)) * 4 + 3];
+
+                    sumR += (2.f/16.f) * src[((y) * width + (x+1)) * 4 + 0];
+                    sumG += (2.f/16.f) * src[((y) * width + (x+1)) * 4 + 1];
+                    sumB += (2.f/16.f) * src[((y) * width + (x+1)) * 4 + 2];
+                    sumA += (2.f/16.f) * src[((y) * width + (x+1)) * 4 + 3];
+
+                    sumR += (1.f/16.f) * src[((y+1) * width + (x-1)) * 4 + 0];
+                    sumG += (1.f/16.f) * src[((y+1) * width + (x-1)) * 4 + 1];
+                    sumB += (1.f/16.f) * src[((y+1) * width + (x-1)) * 4 + 2];
+                    sumA += (1.f/16.f) * src[((y+1) * width + (x-1)) * 4 + 3];
+
+                    sumR += (2.f/16.f) * src[((y+1) * width + (x)) * 4 + 0];
+                    sumG += (2.f/16.f) * src[((y+1) * width + (x)) * 4 + 1];
+                    sumB += (2.f/16.f) * src[((y+1) * width + (x)) * 4 + 2];
+                    sumA += (2.f/16.f) * src[((y+1) * width + (x)) * 4 + 3];
+
+                    sumR += (1.f/16.f) * src[((y+1) * width + (x+1)) * 4 + 0];
+                    sumG += (1.f/16.f) * src[((y+1) * width + (x+1)) * 4 + 1];
+                    sumB += (1.f/16.f) * src[((y+1) * width + (x+1)) * 4 + 2];
+                    sumA += (1.f/16.f) * src[((y+1) * width + (x+1)) * 4 + 3];
+
+                    uint32_t index = (y * width + x) * 4;
+                    image.data[index + 0] = static_cast<unsigned char>(std::round(sumR));
+                    image.data[index + 1] = static_cast<unsigned char>(std::round(sumG));
+                    image.data[index + 2] = static_cast<unsigned char>(std::round(sumB));
+                    image.data[index + 3] = static_cast<unsigned char>(std::round(sumA));
+                }
+            }
+        };
+
+        threads = std::max(1, threads);
+        std::vector<std::thread> ts;
+        ts.reserve(threads);
+        uint32_t rows = height;
+        uint32_t rowsPerThread = std::max<uint32_t>(1, rows / threads);
+        uint32_t yStart = 0;
+        for (int t = 0; t < threads; ++t) {
+            uint32_t yEnd = (t == threads - 1) ? rows : (yStart + rowsPerThread);
+            ts.emplace_back(worker, yStart, yEnd);
+            yStart = yEnd;
+        }
+        for (auto &th : ts) th.join();
+    }
+
     void replaceColor(Image &image, Color colorFind, Color colorReplace) {
         // Iterate over each pixel in the image
         for (uint32_t y = 0; y < image.height; ++y) {
@@ -959,6 +1080,30 @@ namespace mvm {
                 }
             }
         }
+    }
+
+    // Multithreaded alpha set
+    void setAlpha(Image &image, unsigned char alpha, int threads) {
+        if (threads <= 1) { image.setAlpha(alpha); return; }
+        const size_t total = image.data.size();
+        const size_t stride = 4;
+        auto worker = [&](size_t start, size_t end) {
+            // align start to alpha channel offset 3
+            size_t i = (start / stride) * stride + 3;
+            if (i < start) i += stride;
+            for (; i < end; i += stride) {
+                image.data[i] = alpha;
+            }
+        };
+        std::vector<std::thread> ts;
+        size_t chunk = std::max<size_t>(stride * 1024, total / std::max(1, threads));
+        size_t pos = 0;
+        for (int t = 0; t < threads; ++t) {
+            size_t next = (t == threads - 1) ? total : std::min(total, pos + chunk);
+            ts.emplace_back(worker, pos, next);
+            pos = next;
+        }
+        for (auto &th : ts) th.join();
     }
 
 
@@ -1617,6 +1762,61 @@ namespace mvm {
         image.data = std::move(rotatedImage.data);
     }
 
+    void rotateImage(Image &image, Color colorBackground, float degrees, int threads) {
+        if (threads <= 1) { rotateImage(image, colorBackground, degrees); return; }
+        float radians = degrees * M_PI / 180.0f;
+        float cosTheta = std::cos(radians);
+        float sinTheta = std::sin(radians);
+        size_t width = image.width;
+        size_t height = image.height;
+        float centerX = static_cast<float>(width) / 2.0f;
+        float centerY = static_cast<float>(height) / 2.0f;
+
+        Image rotatedImage(image.width, image.height, colorBackground);
+        auto worker = [&](size_t yStart, size_t yEnd) {
+            for (size_t y = yStart; y < yEnd; y++) {
+                for (size_t x = 0; x < width; x++) {
+                    float newX = cosTheta * (x - centerX) + sinTheta * (y - centerY) + centerX;
+                    float newY = -sinTheta * (x - centerX) + cosTheta * (y - centerY) + centerY;
+                    if (newX >= 0 && newX < width - 1 && newY >= 0 && newY < height - 1) {
+                        size_t x0 = static_cast<size_t>(newX);
+                        size_t y0 = static_cast<size_t>(newY);
+                        size_t x1 = x0 + 1;
+                        size_t y1 = y0 + 1;
+                        float alpha = newX - x0;
+                        float beta = newY - y0;
+                        unsigned char *pixel00 = &image.data[image.pixelIndex(x0, y0)];
+                        unsigned char *pixel01 = &image.data[image.pixelIndex(x0, y1)];
+                        unsigned char *pixel10 = &image.data[image.pixelIndex(x1, y0)];
+                        unsigned char *pixel11 = &image.data[image.pixelIndex(x1, y1)];
+                        for (size_t c = 0; c < 4; c++) {
+                            float top = static_cast<float>(pixel00[c]) * (1 - alpha) + static_cast<float>(pixel10[c]) * alpha;
+                            float bottom = static_cast<float>(pixel01[c]) * (1 - alpha) + static_cast<float>(pixel11[c]) * alpha;
+                            float value = top * (1 - beta) + bottom * beta;
+                            auto targetPixelIndex = rotatedImage.pixelIndex(x, y) + c;
+                            if (targetPixelIndex < rotatedImage.data.size())
+                                rotatedImage.data[targetPixelIndex] = static_cast<unsigned char>(value);
+                        }
+                    }
+                }
+            }
+        };
+
+        threads = std::max(1, threads);
+        std::vector<std::thread> ts;
+        ts.reserve(threads);
+        size_t rowsPerThread = std::max<size_t>(1, height / threads);
+        size_t yStart = 0;
+        for (int t = 0; t < threads; ++t) {
+            size_t yEnd = (t == threads - 1) ? height : (yStart + rowsPerThread);
+            ts.emplace_back(worker, yStart, yEnd);
+            yStart = yEnd;
+        }
+        for (auto &th : ts) th.join();
+
+        image.data = std::move(rotatedImage.data);
+    }
+
 
     std::vector<unsigned char> random_walker(uint64_t n) {
         std::random_device rd;  // obtain a random seed from hardware
@@ -1872,6 +2072,7 @@ namespace mvm {
         return filename;
     }
 
+#ifndef MVM_NO_GIST
     std::string effectPoly(Config config, Dsp &dsp, size_t videoFrame, std::vector<float> &audioFrame, uint32_t resolution, std::string fileNamePrefix, ColorGradient &heatmap, bool regenerate = false) {
         const bool verbose = false;
         if (verbose) std::cout << ">> effect poly\n";
@@ -2023,6 +2224,7 @@ namespace mvm {
         }
         return filename;
     }
+#endif
 
     bool isInWaveForm(std::vector<Pixel> &waveForm, uint32_t x, uint32_t y) {
         for (auto const &pixel: waveForm) {
@@ -2054,6 +2256,12 @@ namespace mvm {
         try {
             Image image1(file1);
             Image image2(file2);
+
+            if (image1.width != image2.width || image1.height != image2.height) {
+                fmt::println("Image size mismatch: {}x{} vs {}x{} — skipping pair {} -> {}",
+                             image1.width, image1.height, image2.width, image2.height, file1, file2);
+                return 1;
+            }
             // get a list of all pixels not having background color
             std::vector<std::vector<Pixel>> pixels(2);
             fmt::println("Image 1: {} pixels", getPixelsNotHavingBackground(image1, colorBackground, pixels[0]));
@@ -2129,8 +2337,38 @@ namespace mvm {
                         setPixelAdd(imageTarget, pixel.x, pixel.y, pixel.color);
                     }
                     std::vector<Pixel> interpolatedPixels;
-                    // store Pixels
-                    getPixelsNotHavingBackground(imageTarget, colorBackground, interpolatedPixels);
+                    // store Pixels (threaded scan)
+                    {
+                        // parallel per-row scan building per-thread vectors, then merge
+                        const uint32_t width = imageTarget.width;
+                        const uint32_t height = imageTarget.height;
+                        size_t threads = std::max<size_t>(1, config.threads);
+                        std::vector<std::vector<Pixel>> threadPixels(threads);
+                        auto worker = [&](size_t yStart, size_t yEnd, size_t idx){
+                            Color cb = colorBackground;
+                            for (size_t y = yStart; y < yEnd; ++y) {
+                                for (size_t x = 0; x < width; ++x) {
+                                    Color c = getPixel(imageTarget, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+                                    if (c != cb) threadPixels[idx].push_back({static_cast<uint32_t>(x), static_cast<uint32_t>(y), c});
+                                }
+                            }
+                        };
+                        std::vector<std::thread> ts;
+                        ts.reserve(threads);
+                        size_t rowsPerThread = std::max<size_t>(1, height / threads);
+                        size_t yStart = 0;
+                        for (size_t t = 0; t < threads; ++t) {
+                            size_t yEnd = (t == threads - 1) ? height : (yStart + rowsPerThread);
+                            ts.emplace_back(worker, yStart, yEnd, t);
+                            yStart = yEnd;
+                        }
+                        for (auto &th : ts) th.join();
+                        size_t total = 0; for (auto &v : threadPixels) total += v.size();
+                        interpolatedPixels.reserve(total);
+                        for (auto &v : threadPixels) {
+                            interpolatedPixels.insert(interpolatedPixels.end(), v.begin(), v.end());
+                        }
+                    }
                     // add motion blur
                     gaussianBlurRGBA(imageTarget);
                     // redraw interpolated Pixels
@@ -2177,6 +2415,265 @@ namespace mvm {
 
         return 0;
     }
+
+    // Interpolate without audio/DSP overlay; source images drive all frames
+    int
+    interpolateImages(Config config, std::string file1, std::string file2, const std::string fileTarget, size_t frames, size_t startFrame,
+                      Color colorBackground, bool rotate, bool shuffleStartingPositions = false, size_t inHoldFrames = 0, size_t outHoldFrames = 0,
+                      const std::string &ease = "linear", int blurPasses = 0, bool blurMidOnly = false, float blurMidWidth = 0.2f,
+                      size_t frameThreads = 1)
+    {
+        // helper: easing function
+        auto applyEase = [](const std::string &mode, float t) -> float {
+            if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+            if (mode == "linear") return t;
+            if (mode == "ease-in" || mode == "in") return t * t;
+            if (mode == "ease-out" || mode == "out") { float u = 1.0f - t; return 1.0f - (u * u); }
+            if (mode == "ease-in-out" || mode == "in-out") return t * t * (3.0f - 2.0f * t); // smoothstep
+            return t; // fallback linear
+        };
+
+        // skip generation if any target block exists already
+        for (size_t s = 0; s < inHoldFrames + frames + outHoldFrames; s++) {
+            std::string fileOut = config.path + fileTarget;
+            size_t frameNumber = startFrame + s;
+            std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
+            fileOut += frameNumberString + ".png";
+            if (fileExists(fileOut) && !(isFileEmpty(fileOut))) {
+                fmt::println("block for {} detected", fileOut);
+                return 0;
+            }
+        }
+
+        try {
+            Image image1(file1);
+            Image image2(file2);
+
+            // get a list of all pixels not having background color
+            std::vector<std::vector<Pixel>> pixels(2);
+            fmt::println("Image 1: {} pixels", getPixelsNotHavingBackground(image1, colorBackground, pixels[0]));
+            fmt::println("Image 2: {} pixels", getPixelsNotHavingBackground(image2, colorBackground, pixels[1]));
+
+            // now we need to make sure both lists have the same number of elements
+            size_t index_to_resize = 0;
+            size_t resizeToElements = pixels[1].size();
+            if (pixels[0].size() > pixels[1].size()) {
+                index_to_resize = 1;
+                resizeToElements = pixels[0].size();
+            }
+
+            std::random_device rd;  // obtain a random seed from hardware
+            std::mt19937 gen(rd()); // seed the generator
+            if (!pixels[index_to_resize].empty()) {
+                std::uniform_int_distribution<> distr(0, static_cast<int>(pixels[index_to_resize].size() - 1));
+                fmt::println("Adding {} random pixels for interpolation", std::abs((int)(pixels[0].size() - pixels[1].size())));
+                while (pixels[index_to_resize].size() < resizeToElements) {
+                    size_t copyIndex = static_cast<size_t>(distr(gen));
+                    pixels[index_to_resize].emplace_back(pixels[index_to_resize][copyIndex]);
+                }
+            }
+
+            // random shuffle of starting positions
+            if (shuffleStartingPositions) {
+                std::shuffle(std::begin(pixels[0]), std::end(pixels[0]), gen);
+            }
+
+            // in-hold: duplicate the source keyframe before transition
+            for (size_t h = 0; h < inHoldFrames; ++h) {
+                std::string fileOut = config.path + fileTarget;
+                size_t frameNumber = startFrame + h;
+                std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
+                fileOut += frameNumberString + ".png";
+                fmt::println("holding {} as {}", file1, fileOut);
+                Image out = image1;
+                out.savePNG(fileOut);
+            }
+
+            float stepSize = 1.0f / static_cast<float>(frames);
+            float rotateStepSize = 360.0f / static_cast<float>(frames);
+
+            auto renderFrame = [&](size_t s) {
+                std::string fileOut = config.path + fileTarget;
+                float linearFraction = 0.0f + (stepSize * static_cast<float>(s));
+                float fraction = applyEase(ease, linearFraction);
+                float degrees = 0.0f + (rotateStepSize * static_cast<float>(s));
+                size_t frameNumber = startFrame + inHoldFrames + s;
+                std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
+                fileOut += frameNumberString + ".png";
+                fmt::println("generating {}", fileOut);
+
+                // Interpolate into a new image
+                Image imageTarget(image1.width, image1.height);
+                setAlpha(imageTarget, 255, static_cast<int>(config.threads));
+
+                bool sourceIsTarget = false;
+                if (s == 0) {
+                    imageTarget = image1;
+                    sourceIsTarget = true;
+                } else if (s == frames - 1) {
+                    imageTarget = image2;
+                    sourceIsTarget = true;
+                } else {
+                    // Per-thread accumulation buffers to avoid write conflicts
+                    size_t threads = std::max<size_t>(1, config.threads);
+                    std::vector<std::vector<unsigned char>> threadBuffers(
+                        threads, std::vector<unsigned char>(imageTarget.data.size(), 0)
+                    );
+                    auto worker = [&](size_t idxStart, size_t idxEnd, size_t tid) {
+                        auto &buf = threadBuffers[tid];
+                        for (size_t i = idxStart; i < idxEnd; ++i) {
+                            Pixel p = interpolate(pixels[0][i], pixels[1][i], fraction);
+                            if (p.x >= imageTarget.width || p.y >= imageTarget.height) continue;
+                            size_t index = 4 * (p.y * imageTarget.width + p.x);
+                            int r = buf[index + 0] + p.color.r; if (r > 255) r = 255;
+                            int g = buf[index + 1] + p.color.g; if (g > 255) g = 255;
+                            int b = buf[index + 2] + p.color.b; if (b > 255) b = 255;
+                            int a = buf[index + 3] + p.color.alpha; if (a > 255) a = 255;
+                            buf[index + 0] = static_cast<unsigned char>(r);
+                            buf[index + 1] = static_cast<unsigned char>(g);
+                            buf[index + 2] = static_cast<unsigned char>(b);
+                            buf[index + 3] = static_cast<unsigned char>(a);
+                        }
+                    };
+                    size_t totalPixels = pixels[0].size();
+                    size_t chunk = std::max<size_t>(1, totalPixels / threads);
+                    std::vector<std::thread> ts;
+                    ts.reserve(threads);
+                    size_t iStart = 0;
+                    for (size_t t = 0; t < threads; ++t) {
+                        size_t iEnd = (t == threads - 1) ? totalPixels : (iStart + chunk);
+                        ts.emplace_back(worker, iStart, iEnd, t);
+                        iStart = iEnd;
+                    }
+                    for (auto &th : ts) th.join();
+
+                    // Reduce buffers deterministically into imageTarget
+                    for (size_t idx = 0; idx + 3 < imageTarget.data.size(); idx += 4) {
+                        int r = imageTarget.data[idx+0];
+                        int g = imageTarget.data[idx+1];
+                        int b = imageTarget.data[idx+2];
+                        int a = imageTarget.data[idx+3];
+                        for (size_t t = 0; t < threads; ++t) {
+                            r += threadBuffers[t][idx+0]; if (r > 255) r = 255;
+                            g += threadBuffers[t][idx+1]; if (g > 255) g = 255;
+                            b += threadBuffers[t][idx+2]; if (b > 255) b = 255;
+                            a += threadBuffers[t][idx+3]; if (a > 255) a = 255;
+                        }
+                        imageTarget.data[idx+0] = static_cast<unsigned char>(r);
+                        imageTarget.data[idx+1] = static_cast<unsigned char>(g);
+                        imageTarget.data[idx+2] = static_cast<unsigned char>(b);
+                        imageTarget.data[idx+3] = static_cast<unsigned char>(a);
+                    }
+
+                    // collect non-background pixels with threads
+                    std::vector<Pixel> interpolatedPixels;
+                    {
+                        const uint32_t width = imageTarget.width;
+                        const uint32_t height = imageTarget.height;
+                        size_t scanThreads = std::max<size_t>(1, config.threads);
+                        std::vector<std::vector<Pixel>> threadPixels(scanThreads);
+                        auto scanWorker = [&](size_t yStart, size_t yEnd, size_t idx){
+                            Color cb = colorBackground;
+                            for (size_t y = yStart; y < yEnd; ++y) {
+                                for (size_t x = 0; x < width; ++x) {
+                                    Color c = getPixel(imageTarget, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+                                    if (c != cb) threadPixels[idx].push_back({static_cast<uint32_t>(x), static_cast<uint32_t>(y), c});
+                                }
+                            }
+                        };
+                        std::vector<std::thread> ts2;
+                        ts2.reserve(scanThreads);
+                        size_t rowsPerThread = std::max<size_t>(1, height / scanThreads);
+                        size_t yStart = 0;
+                        for (size_t t = 0; t < scanThreads; ++t) {
+                            size_t yEnd = (t == scanThreads - 1) ? height : (yStart + rowsPerThread);
+                            ts2.emplace_back(scanWorker, yStart, yEnd, t);
+                            yStart = yEnd;
+                        }
+                        for (auto &th : ts2) th.join();
+                        size_t total = 0; for (auto &v : threadPixels) total += v.size();
+                        interpolatedPixels.reserve(total);
+                        for (auto &v : threadPixels) {
+                            interpolatedPixels.insert(interpolatedPixels.end(), v.begin(), v.end());
+                        }
+                    }
+
+                    // optional blur (overall or around mid-transition only)
+                    int passes = blurPasses;
+                    if (blurMidOnly) {
+                        float midDistance = std::abs(linearFraction - 0.5f);
+                        if (midDistance > blurMidWidth) passes = 0;
+                    }
+                    for (int p = 0; p < passes; ++p) {
+                        if (config.threads <= 1) gaussianBlurRGBA(imageTarget);
+                        else gaussianBlurRGBA(imageTarget, static_cast<int>(config.threads));
+                    }
+                    // redraw interpolated Pixels
+                    for (size_t i = 0; i < interpolatedPixels.size(); i++) {
+                        setPixel(imageTarget, interpolatedPixels[i].x, interpolatedPixels[i].y, interpolatedPixels[i].color);
+                    }
+                }
+
+                if (rotate && !sourceIsTarget) {
+                    if (config.threads <= 1) rotateImage(imageTarget, colorBackground, degrees);
+                    else rotateImage(imageTarget, colorBackground, degrees, static_cast<int>(config.threads));
+                }
+
+                imageTarget.savePNG(fileOut);
+            };
+
+            frameThreads = std::max<size_t>(1, frameThreads);
+            for (size_t s = 0; s < frames; ) {
+                size_t batch = std::min(frameThreads, frames - s);
+                std::vector<std::thread> ts;
+                ts.reserve(batch);
+                for (size_t b = 0; b < batch; ++b) {
+                    ts.emplace_back(renderFrame, s + b);
+                }
+                for (auto &th : ts) th.join();
+                s += batch;
+            }
+
+            // hold final keyframe (image2) for additional frames
+            for (size_t h = 0; h < outHoldFrames; ++h) {
+                std::string fileOut = config.path + fileTarget;
+                size_t frameNumber = startFrame + inHoldFrames + frames + h;
+                std::string frameNumberString = fmt::format("{:0{}d}", frameNumber, 9);
+                fileOut += frameNumberString + ".png";
+                fmt::println("holding {} as {}", file2, fileOut);
+                Image out = image2;
+                out.savePNG(fileOut);
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            return 1;
+        }
+
+        return 0;
+    }
+}
+
+static void printUsage()
+{
+    fmt::println("mvm usage:");
+    fmt::println("  --input-dir, -I   <dir>     Interpolate alphabetically between images in <dir>");
+    fmt::println("  --out, -o         <dir>     Output directory (default: /Users/ulli/Documents/mvm/)");
+    fmt::println("  --prefix, -p      <name>    Output file prefix (default: seq_)");
+    fmt::println("  --frames, -n      <num>     Frames per transition (default: 50)");
+    fmt::println("  --start, -S       <num>     Start frame number (default: 1)");
+    fmt::println("  --hold, -H        <num>     Hold the destination keyframe for <num> extra frames (default: 0)");
+    fmt::println("  --in-hold         <num>     Hold the source keyframe before the transition (default: 0)");
+    fmt::println("  --ease            <mode>    Easing: linear|ease-in|ease-out|ease-in-out (default: linear)");
+    fmt::println("  --blur            <num>     Apply N passes of 3x3 blur during interpolation (default: 0)");
+    fmt::println("  --blur-mid-only              Only blur near the mid-transition (with --blur)");
+    fmt::println("  --blur-mid-width  <0..0.5>  Width around mid where blur applies (default: 0.2)");
+    fmt::println("  --threads, -t     <num>     Number of threads for image processing (default: 1)");
+    fmt::println("  --frame-threads   <num>     Number of frames to render concurrently (default: 1)");
+    fmt::println("  --kf-hold         <num>     Hold (still) frames for each keyframe automatically");
+    fmt::println("  --first-kf-hold   <num>     Override hold for FIRST keyframe (defaults to --kf-hold)");
+    fmt::println("  --last-kf-hold    <num>     Override hold for LAST keyframe (defaults to --kf-hold)");
+    fmt::println("  --rotate                    Enable rotation during interpolation");
+    fmt::println("  --help, -h                  Show this help");
 }
 
 void test_squares() {
@@ -2254,12 +2751,131 @@ int example_walker2() {
     return 0;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // Simple CLI: folder-driven interpolation mode or classic mode
+    std::string inputDir;
+    std::string outDir = "/Users/ulli/Documents/mvm/";
+    std::string outPrefix = "seq_";
+    size_t framesPerTransition = 50;
+    size_t startFrame = 1;
+    bool rotate = false;
+    size_t holdFrames = 0;
+    size_t inHoldFrames = 0;
+    std::string ease = "linear";
+    int blurPasses = 0;
+    bool blurMidOnly = false;
+    float blurMidWidth = 0.2f;
+    size_t numThreads = 1;
+    size_t numFrameThreads = 1;
+    size_t keyframeHoldFrames = 0; // disabled by default
+    bool hasFirstKfHold = false;
+    bool hasLastKfHold = false;
+    size_t firstKfHold = 0;
+    size_t lastKfHold = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--input-dir" || arg == "-I") {
+            if (i + 1 < argc) inputDir = argv[++i];
+        } else if (arg == "--out" || arg == "-o") {
+            if (i + 1 < argc) outDir = argv[++i];
+            if (!outDir.empty() && outDir.back() != '/') outDir += "/";
+        } else if (arg == "--prefix" || arg == "-p") {
+            if (i + 1 < argc) outPrefix = argv[++i];
+        } else if (arg == "--frames" || arg == "-n") {
+            if (i + 1 < argc) framesPerTransition = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--start" || arg == "-S") {
+            if (i + 1 < argc) startFrame = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--hold" || arg == "-H") {
+            if (i + 1 < argc) holdFrames = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--in-hold") {
+            if (i + 1 < argc) inHoldFrames = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--ease") {
+            if (i + 1 < argc) ease = argv[++i];
+        } else if (arg == "--blur") {
+            if (i + 1 < argc) blurPasses = std::stoi(argv[++i]);
+        } else if (arg == "--blur-mid-only") {
+            blurMidOnly = true;
+        } else if (arg == "--blur-mid-width") {
+            if (i + 1 < argc) blurMidWidth = std::stof(argv[++i]);
+        } else if (arg == "--threads" || arg == "-t") {
+            if (i + 1 < argc) numThreads = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--frame-threads") {
+            if (i + 1 < argc) numFrameThreads = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--kf-hold") {
+            if (i + 1 < argc) keyframeHoldFrames = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--first-kf-hold") {
+            if (i + 1 < argc) { firstKfHold = static_cast<size_t>(std::stoul(argv[++i])); hasFirstKfHold = true; }
+        } else if (arg == "--last-kf-hold") {
+            if (i + 1 < argc) { lastKfHold = static_cast<size_t>(std::stoul(argv[++i])); hasLastKfHold = true; }
+        } else if (arg == "--rotate") {
+            rotate = true;
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage();
+            return 0;
+        }
+    }
+
+    if (!inputDir.empty()) {
+        // Folder-driven interpolation mode
+        mvm::Config config;
+        config.path = outDir;
+        config.threads = std::max<size_t>(1, numThreads);
+        auto files = mvm::listImagesSorted(inputDir);
+        if (files.size() < 2) {
+            fmt::println("No input images found in {} (need at least 2)", inputDir);
+            return 1;
+        }
+
+        mvm::Color colorBackground = { 0, 0, 0, 255 };
+        fmt::println("MVM - interpolating {} transitions", files.size() - 1);
+        for (size_t i = 0; i + 1 < files.size(); ++i) {
+            const std::string &img1 = files[i];
+            const std::string &img2 = files[i + 1];
+            size_t inHold = inHoldFrames;
+            size_t outHold = holdFrames;
+            if (keyframeHoldFrames > 0) {
+                // per-keyframe scheduling
+                size_t holdForThisKey = (i == 0 && hasFirstKfHold) ? firstKfHold : keyframeHoldFrames;
+                inHold = holdForThisKey;
+                if (i == files.size() - 2) {
+                    // last pair: also hold the last keyframe
+                    size_t lastHold = hasLastKfHold ? lastKfHold : keyframeHoldFrames;
+                    outHold = lastHold;
+                } else {
+                    outHold = 0;
+                }
+            }
+            fmt::println("transition for frames {} to {}", startFrame, (startFrame + inHold + framesPerTransition + outHold) - 1);
+            mvm::interpolateImages(
+                config,
+                img1,
+                img2,
+                outPrefix,
+                framesPerTransition,
+                startFrame,
+                colorBackground,
+                rotate,
+                false,
+                inHold,
+                outHold,
+                ease,
+                blurPasses,
+                blurMidOnly,
+                blurMidWidth,
+                std::max<size_t>(1, numFrameThreads)
+            );
+            startFrame += (inHold + framesPerTransition + outHold);
+        }
+        return 0;
+    }
+
     float fc1 = 0.01f;      // Low-pass filter cutoff frequency
     float fl = 0.1f;        // Mid-pass filter lower cutoff frequency
     float fh = 0.5f;        // Mid-pass filter higher cutoff frequency
     float fc2 = 0.5f;       // High-pass filter cutoff frequency
 
+#ifndef MVM_NO_GIST
     mvm::Config config;
     config.path="/Users/ulli/Documents/mvm/";
     std::string audioFileName ="super8.mp3";
@@ -2296,4 +2912,8 @@ int main() {
     }
 
     return 0;
+#else
+    fmt::println("No input-dir specified and Gist disabled (MVM_NO_GIST). Exiting.");
+    return 1;
+#endif
 }

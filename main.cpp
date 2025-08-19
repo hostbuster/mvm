@@ -960,6 +960,78 @@ namespace mvm {
         image.data[index + 3] = colorMixed.alpha;
     }
 
+    // --- Starfield overlay (parallax, horizontal) ---
+    inline uint32_t fastHash(uint32_t x) {
+        x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16; return x;
+    }
+
+    inline bool isBackgroundLike(const Color &c, const Color &ref, uint8_t rgbThreshold, uint8_t alphaMax)
+    {
+        // Transparent or nearly transparent counts as background
+        if (c.alpha <= alphaMax) return true;
+        // Or near the reference RGB (e.g., black)
+        return (std::abs(int(c.r) - int(ref.r)) <= rgbThreshold) &&
+               (std::abs(int(c.g) - int(ref.g)) <= rgbThreshold) &&
+               (std::abs(int(c.b) - int(ref.b)) <= rgbThreshold);
+    }
+
+    void drawStarfieldOverlay(Image &image,
+                              Color backgroundColor,
+                              size_t absoluteFrameNumber,
+                              size_t layer1Count,
+                              float layer1SpeedPxPerFrame,
+                              size_t layer2Count,
+                              float layer2SpeedPxPerFrame,
+                              uint32_t seed,
+                              uint8_t bgRGBThreshold,
+                              uint8_t alphaMaxThreshold,
+                              uint32_t starSize,
+                              bool ignoreBackground)
+    {
+        const Color starColorA {255, 0, 168, 255};   // ff00a8
+        const Color starColorB {0, 168, 255, 255};   // 00a8ff
+        if (starSize == 0) starSize = 1;
+        uint32_t half = starSize / 2;
+        size_t starsDrawn = 0;
+
+        auto drawLayer = [&](size_t count, float speed, uint32_t layerId) {
+            if (count == 0) return;
+            for (size_t i = 0; i < count; ++i) {
+                uint32_t h = fastHash(static_cast<uint32_t>(seed ^ (layerId * 16777619u) ^ (i * 2654435761u)));
+                uint32_t y = (h % image.height);
+                uint32_t x0 = fastHash(h ^ 0x9e3779b9u) % image.width;
+                // position advances to the left -> right (horizontal)
+                float xf = static_cast<float>(x0) + speed * static_cast<float>(absoluteFrameNumber);
+                int xi = static_cast<int>(std::fmod(std::fabs(xf), static_cast<float>(image.width)));
+                if (xi < 0) xi += image.width;
+                uint32_t x = static_cast<uint32_t>(xi);
+                // pick color deterministically
+                Color c = ((h & 1u) == 0u) ? starColorA : starColorB;
+                // draw only on near-background pixels, allow star size > 1
+                for (int dy = -int(half); dy <= int(half); ++dy) {
+                    int yy = int(y) + dy; if (yy < 0 || yy >= int(image.height)) continue;
+                    for (int dx = -int(half); dx <= int(half); ++dx) {
+                        int xx = int(x) + dx; if (xx < 0 || xx >= int(image.width)) continue;
+                        Color dst = getPixel(image, (uint32_t)xx, (uint32_t)yy);
+                        if (ignoreBackground || isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
+                            setPixelAdd(image, (uint32_t)xx, (uint32_t)yy, c);
+                            starsDrawn++;
+                        }
+                    }
+                }
+            }
+        };
+
+        drawLayer(layer1Count, layer1SpeedPxPerFrame, 1u);
+        drawLayer(layer2Count, layer2SpeedPxPerFrame, 2u);
+
+        static int debugPrints = 0;
+        if (debugPrints < 3) {
+            fmt::println("Starfield frame {}: drawn {} stars (l1={}, l2={})", absoluteFrameNumber, starsDrawn, layer1Count, layer2Count);
+            debugPrints++;
+        }
+    }
+
 
     void gaussianBlurRGBA(Image &image) {
         // Create a 3x3 Gaussian kernel
@@ -2421,7 +2493,13 @@ namespace mvm {
     interpolateImages(Config config, std::string file1, std::string file2, const std::string fileTarget, size_t frames, size_t startFrame,
                       Color colorBackground, bool rotate, bool shuffleStartingPositions = false, size_t inHoldFrames = 0, size_t outHoldFrames = 0,
                       const std::string &ease = "linear", int blurPasses = 0, bool blurMidOnly = false, float blurMidWidth = 0.2f,
-                      size_t frameThreads = 1)
+                      size_t frameThreads = 1,
+                      bool enableStars = false,
+                      size_t starsLayer1Count = 200, float starsLayer1Speed = 0.7f,
+                      size_t starsLayer2Count = 80,  float starsLayer2Speed = 1.4f,
+                      uint32_t starsSeed = 1337u,
+                      uint32_t starsSizePx = 3,
+                      bool starsForeground = false)
     {
         // helper: easing function
         auto applyEase = [](const std::string &mode, float t) -> float {
@@ -2486,6 +2564,13 @@ namespace mvm {
                 fileOut += frameNumberString + ".png";
                 fmt::println("holding {} as {}", file1, fileOut);
                 Image out = image1;
+                if (enableStars) {
+                    drawStarfieldOverlay(out, colorBackground, frameNumber,
+                                          starsLayer1Count, starsLayer1Speed,
+                                          starsLayer2Count, starsLayer2Speed,
+                                          starsSeed,
+                                          5, 5, starsSizePx, starsForeground);
+                }
                 out.savePNG(fileOut);
             }
 
@@ -2619,6 +2704,17 @@ namespace mvm {
                     else rotateImage(imageTarget, colorBackground, degrees, static_cast<int>(config.threads));
                 }
 
+                if (enableStars) {
+                    drawStarfieldOverlay(imageTarget, colorBackground, frameNumber,
+                                          starsLayer1Count, starsLayer1Speed,
+                                          starsLayer2Count, starsLayer2Speed,
+                                          starsSeed,
+                                          5,    // RGB threshold (assuming black bg)
+                                          5,    // alpha threshold
+                                          starsSizePx,   // star size (px)
+                                          starsForeground); // draw in foreground if requested
+                }
+
                 imageTarget.savePNG(fileOut);
             };
 
@@ -2642,6 +2738,13 @@ namespace mvm {
                 fileOut += frameNumberString + ".png";
                 fmt::println("holding {} as {}", file2, fileOut);
                 Image out = image2;
+                if (enableStars) {
+                    drawStarfieldOverlay(out, colorBackground, frameNumber,
+                                          starsLayer1Count, starsLayer1Speed,
+                                          starsLayer2Count, starsLayer2Speed,
+                                          starsSeed,
+                                          5, 5, starsSizePx, starsForeground);
+                }
                 out.savePNG(fileOut);
             }
         } catch (const std::exception &e) {
@@ -2672,6 +2775,12 @@ static void printUsage()
     fmt::println("  --kf-hold         <num>     Hold (still) frames for each keyframe automatically");
     fmt::println("  --first-kf-hold   <num>     Override hold for FIRST keyframe (defaults to --kf-hold)");
     fmt::println("  --last-kf-hold    <num>     Override hold for LAST keyframe (defaults to --kf-hold)");
+    fmt::println("  --stars                      Enable parallax starfield overlay");
+    fmt::println("  --stars-layer1 <count,speed> Layer1 stars and speed in px/frame (e.g., 200,0.7)");
+    fmt::println("  --stars-layer2 <count,speed> Layer2 stars and speed in px/frame (e.g., 80,1.4)");
+    fmt::println("  --stars-seed     <num>       Seed for deterministic star positions");
+    fmt::println("  --stars-size     <px>        Star size in pixels (default: 3)");
+    fmt::println("  --stars-foreground           Draw stars in the foreground (ignore background)");
     fmt::println("  --rotate                    Enable rotation during interpolation");
     fmt::println("  --help, -h                  Show this help");
 }
@@ -2767,6 +2876,12 @@ int main(int argc, char** argv) {
     float blurMidWidth = 0.2f;
     size_t numThreads = 1;
     size_t numFrameThreads = 1;
+    bool enableStars = false;
+    size_t starsLayer1Count = 200; float starsLayer1Speed = 0.7f;
+    size_t starsLayer2Count = 80;  float starsLayer2Speed = 1.4f;
+    uint32_t starsSeed = 1337u;
+    uint32_t starsSizePx = 3;
+    bool starsForeground = false;
     size_t keyframeHoldFrames = 0; // disabled by default
     bool hasFirstKfHold = false;
     bool hasLastKfHold = false;
@@ -2808,6 +2923,18 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) { firstKfHold = static_cast<size_t>(std::stoul(argv[++i])); hasFirstKfHold = true; }
         } else if (arg == "--last-kf-hold") {
             if (i + 1 < argc) { lastKfHold = static_cast<size_t>(std::stoul(argv[++i])); hasLastKfHold = true; }
+        } else if (arg == "--stars") {
+            enableStars = true;
+        } else if (arg == "--stars-layer1") {
+            if (i + 1 < argc) { std::string v = argv[++i]; auto pos = v.find(','); if (pos != std::string::npos) { starsLayer1Count = static_cast<size_t>(std::stoul(v.substr(0,pos))); starsLayer1Speed = std::stof(v.substr(pos+1)); } }
+        } else if (arg == "--stars-layer2") {
+            if (i + 1 < argc) { std::string v = argv[++i]; auto pos = v.find(','); if (pos != std::string::npos) { starsLayer2Count = static_cast<size_t>(std::stoul(v.substr(0,pos))); starsLayer2Speed = std::stof(v.substr(pos+1)); } }
+        } else if (arg == "--stars-seed") {
+            if (i + 1 < argc) starsSeed = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--stars-size") {
+            if (i + 1 < argc) starsSizePx = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--stars-foreground") {
+            starsForeground = true;
         } else if (arg == "--rotate") {
             rotate = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -2863,7 +2990,11 @@ int main(int argc, char** argv) {
                 blurPasses,
                 blurMidOnly,
                 blurMidWidth,
-                std::max<size_t>(1, numFrameThreads)
+                std::max<size_t>(1, numFrameThreads),
+                enableStars,
+                starsLayer1Count, starsLayer1Speed,
+                starsLayer2Count, starsLayer2Speed,
+                starsSeed
             );
             startFrame += (inHold + framesPerTransition + outHold);
         }

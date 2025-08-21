@@ -978,23 +978,21 @@ namespace mvm {
     void drawStarfieldOverlay(Image &image,
                               Color backgroundColor,
                               size_t absoluteFrameNumber,
-                              size_t layer1Count,
-                              float layer1SpeedPxPerFrame,
-                              size_t layer2Count,
-                              float layer2SpeedPxPerFrame,
+                              const std::vector<std::pair<size_t,float>> &layers, // {count, speed}
                               uint32_t seed,
                               uint8_t bgRGBThreshold,
                               uint8_t alphaMaxThreshold,
-                              uint32_t starSize,
+                              uint32_t sizeScale,
                               bool ignoreBackground)
     {
         const Color starColorA {255, 0, 168, 255};   // ff00a8
         const Color starColorB {0, 168, 255, 255};   // 00a8ff
-        if (starSize == 0) starSize = 1;
-        uint32_t half = starSize / 2;
+        if (sizeScale == 0) sizeScale = 1;
         size_t starsDrawn = 0;
+        struct Star { uint32_t x; uint32_t y; uint32_t size; Color color; };
+        std::vector<Star> stars;
 
-        auto drawLayer = [&](size_t count, float speed, uint32_t layerId) {
+        auto collectLayer = [&](size_t count, float speed, uint32_t layerId) {
             if (count == 0) return;
             for (size_t i = 0; i < count; ++i) {
                 uint32_t h = fastHash(static_cast<uint32_t>(seed ^ (layerId * 16777619u) ^ (i * 2654435761u)));
@@ -1007,27 +1005,46 @@ namespace mvm {
                 uint32_t x = static_cast<uint32_t>(xi);
                 // pick color deterministically
                 Color c = ((h & 1u) == 0u) ? starColorA : starColorB;
-                // draw only on near-background pixels, allow star size > 1
-                for (int dy = -int(half); dy <= int(half); ++dy) {
-                    int yy = int(y) + dy; if (yy < 0 || yy >= int(image.height)) continue;
-                    for (int dx = -int(half); dx <= int(half); ++dx) {
-                        int xx = int(x) + dx; if (xx < 0 || xx >= int(image.width)) continue;
-                        Color dst = getPixel(image, (uint32_t)xx, (uint32_t)yy);
-                        if (ignoreBackground || isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
-                            setPixelAdd(image, (uint32_t)xx, (uint32_t)yy, c);
-                            starsDrawn++;
-                        }
-                    }
-                }
+                // compute star size from speed (parallax effect) with slight jitter
+                float baseSize = std::max(1.0f, speed * static_cast<float>(sizeScale));
+                uint32_t starSize = static_cast<uint32_t>(std::round(baseSize));
+                starSize += (h >> 24) % 2; // jitter 0..1
+                if (starSize < 1) starSize = 1;
+                uint32_t half = starSize / 2;
+                stars.push_back({x, y, starSize, c});
             }
         };
 
-        drawLayer(layer1Count, layer1SpeedPxPerFrame, 1u);
-        drawLayer(layer2Count, layer2SpeedPxPerFrame, 2u);
+        for (size_t li = 0; li < layers.size(); ++li) {
+            collectLayer(layers[li].first, layers[li].second, static_cast<uint32_t>(li + 1));
+        }
+
+        // Draw from smallest to largest so larger (nearer) stars overlay perfectly
+        std::stable_sort(stars.begin(), stars.end(), [](const Star &a, const Star &b){
+            if (a.size != b.size) return a.size < b.size;
+            // secondary stable ordering for determinism
+            if (a.y != b.y) return a.y < b.y;
+            return a.x < b.x;
+        });
+
+        for (const Star &s : stars) {
+            uint32_t half = s.size / 2;
+            for (int dy = -int(half); dy <= int(half); ++dy) {
+                int yy = int(s.y) + dy; if (yy < 0 || yy >= int(image.height)) continue;
+                for (int dx = -int(half); dx <= int(half); ++dx) {
+                    int xx = int(s.x) + dx; if (xx < 0 || xx >= int(image.width)) continue;
+                    Color dst = getPixel(image, (uint32_t)xx, (uint32_t)yy);
+                    if (ignoreBackground || isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
+                        setPixelAdd(image, (uint32_t)xx, (uint32_t)yy, s.color);
+                        starsDrawn++;
+                    }
+                }
+            }
+        }
 
         static int debugPrints = 0;
         if (debugPrints < 3) {
-            fmt::println("Starfield frame {}: drawn {} stars (l1={}, l2={})", absoluteFrameNumber, starsDrawn, layer1Count, layer2Count);
+            fmt::println("Starfield frame {}: drawn {} stars", absoluteFrameNumber, starsDrawn);
             debugPrints++;
         }
     }
@@ -2565,11 +2582,19 @@ namespace mvm {
                 fmt::println("holding {} as {}", file1, fileOut);
                 Image out = image1;
                 if (enableStars) {
+                    std::vector<std::pair<size_t,float>> starLayers = {
+                        {starsLayer1Count, starsLayer1Speed},
+                        {starsLayer2Count, starsLayer2Speed},
+                        {starsLayer2Count/2, starsLayer2Speed*1.8f},
+                        {starsLayer1Count/2, starsLayer1Speed*0.6f}
+                    };
                     drawStarfieldOverlay(out, colorBackground, frameNumber,
-                                          starsLayer1Count, starsLayer1Speed,
-                                          starsLayer2Count, starsLayer2Speed,
+                                          starLayers,
                                           starsSeed,
-                                          5, 5, starsSizePx, starsForeground);
+                                          5,    // RGB threshold (assuming black bg)
+                                          5,    // alpha threshold
+                                          starsSizePx,   // size scale
+                                          starsForeground); // draw in foreground if requested
                 }
                 out.savePNG(fileOut);
             }
@@ -2705,13 +2730,18 @@ namespace mvm {
                 }
 
                 if (enableStars) {
+                    std::vector<std::pair<size_t,float>> starLayers = {
+                        {starsLayer1Count, starsLayer1Speed},
+                        {starsLayer2Count, starsLayer2Speed},
+                        {starsLayer2Count/2, starsLayer2Speed*1.8f},
+                        {starsLayer1Count/2, starsLayer1Speed*0.6f}
+                    };
                     drawStarfieldOverlay(imageTarget, colorBackground, frameNumber,
-                                          starsLayer1Count, starsLayer1Speed,
-                                          starsLayer2Count, starsLayer2Speed,
+                                          starLayers,
                                           starsSeed,
                                           5,    // RGB threshold (assuming black bg)
                                           5,    // alpha threshold
-                                          starsSizePx,   // star size (px)
+                                          starsSizePx,   // size scale
                                           starsForeground); // draw in foreground if requested
                 }
 
@@ -2739,11 +2769,19 @@ namespace mvm {
                 fmt::println("holding {} as {}", file2, fileOut);
                 Image out = image2;
                 if (enableStars) {
+                    std::vector<std::pair<size_t,float>> starLayers = {
+                        {starsLayer1Count, starsLayer1Speed},
+                        {starsLayer2Count, starsLayer2Speed},
+                        {starsLayer2Count/2, starsLayer2Speed*1.8f},
+                        {starsLayer1Count/2, starsLayer1Speed*0.6f}
+                    };
                     drawStarfieldOverlay(out, colorBackground, frameNumber,
-                                          starsLayer1Count, starsLayer1Speed,
-                                          starsLayer2Count, starsLayer2Speed,
+                                          starLayers,
                                           starsSeed,
-                                          5, 5, starsSizePx, starsForeground);
+                                          5,    // RGB threshold (assuming black bg)
+                                          5,    // alpha threshold
+                                          starsSizePx,   // size scale
+                                          starsForeground); // draw in foreground if requested
                 }
                 out.savePNG(fileOut);
             }

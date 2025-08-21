@@ -10,6 +10,7 @@
 #include <cmath>
 #include <utility>
 #include <vector>
+#include <sstream>
 #include <png.h>
 #include <random>
 #include <queue>
@@ -979,6 +980,16 @@ namespace mvm {
                               Color backgroundColor,
                               size_t absoluteFrameNumber,
                               const std::vector<std::pair<size_t,float>> &layers, // {count, speed}
+                              const std::vector<float> &layerYOffsets,            // per-layer vertical offsets (px)
+                              bool twinkleEnabled,
+                              int twinklePeriodFrames,
+                              int trailLength,
+                              float trailFade,
+                              bool deflectEnabled,
+                              bool deflectAttract,
+                              int deflectRangePx,
+                              float deflectStrength,
+                              bool occludeByText,
                               uint32_t seed,
                               uint8_t bgRGBThreshold,
                               uint8_t alphaMaxThreshold,
@@ -996,7 +1007,16 @@ namespace mvm {
             if (count == 0) return;
             for (size_t i = 0; i < count; ++i) {
                 uint32_t h = fastHash(static_cast<uint32_t>(seed ^ (layerId * 16777619u) ^ (i * 2654435761u)));
-                uint32_t y = (h % image.height);
+                // base y and per-layer vertical offset
+                int baseY = static_cast<int>(h % image.height);
+                float yOffset = 0.0f;
+                size_t layerIndex0 = (layerId == 0 ? 0 : static_cast<size_t>(layerId - 1));
+                if (!layerYOffsets.empty() && layerIndex0 < layerYOffsets.size()) yOffset = layerYOffsets[layerIndex0];
+                int yWithOffset = baseY + static_cast<int>(std::round(yOffset));
+                // wrap vertically
+                while (yWithOffset < 0) yWithOffset += static_cast<int>(image.height);
+                while (yWithOffset >= static_cast<int>(image.height)) yWithOffset -= static_cast<int>(image.height);
+                uint32_t y = static_cast<uint32_t>(yWithOffset);
                 uint32_t x0 = fastHash(h ^ 0x9e3779b9u) % image.width;
                 // position advances to the left -> right (horizontal)
                 float xf = static_cast<float>(x0) + speed * static_cast<float>(absoluteFrameNumber);
@@ -1010,7 +1030,6 @@ namespace mvm {
                 uint32_t starSize = static_cast<uint32_t>(std::round(baseSize));
                 starSize += (h >> 24) % 2; // jitter 0..1
                 if (starSize < 1) starSize = 1;
-                uint32_t half = starSize / 2;
                 stars.push_back({x, y, starSize, c});
             }
         };
@@ -1027,16 +1046,88 @@ namespace mvm {
             return a.x < b.x;
         });
 
+        auto drawOne = [&](int x, int y, const Color &color){
+            if (x < 0 || y < 0 || x >= static_cast<int>(image.width) || y >= static_cast<int>(image.height)) return;
+            Color dst = getPixel(image, (uint32_t)x, (uint32_t)y);
+            if (occludeByText && !isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
+                return; // don't draw over text/glyphs
+            }
+            if (ignoreBackground || isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
+                setPixelAdd(image, (uint32_t)x, (uint32_t)y, color);
+                starsDrawn++;
+            }
+        };
+
+        auto nearestTextVector = [&](int x, int y) -> std::pair<bool, std::pair<float,float>> {
+            if (deflectRangePx <= 0) return {false, {0.0f, 0.0f}};
+            int R = deflectRangePx;
+            int bestR2 = R*R + 1;
+            int bestDx = 0, bestDy = 0;
+            for (int dy = -R; dy <= R; ++dy) {
+                int yy = y + dy; if (yy < 0 || yy >= static_cast<int>(image.height)) continue;
+                for (int dx = -R; dx <= R; ++dx) {
+                    int xx = x + dx; if (xx < 0 || xx >= static_cast<int>(image.width)) continue;
+                    int r2 = dx*dx + dy*dy; if (r2 == 0 || r2 >= bestR2) continue;
+                    Color c = getPixel(image, (uint32_t)xx, (uint32_t)yy);
+                    if (!isBackgroundLike(c, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
+                        bestR2 = r2; bestDx = dx; bestDy = dy;
+                    }
+                }
+            }
+            if (bestR2 <= R*R) {
+                float dist = std::sqrt(static_cast<float>(bestR2));
+                float nx = (dist > 0.0f) ? static_cast<float>(bestDx) / dist : 0.0f;
+                float ny = (dist > 0.0f) ? static_cast<float>(bestDy) / dist : 0.0f;
+                // toward or away from text
+                float sgn = deflectAttract ? 1.0f : -1.0f;
+                float falloff = 1.0f - std::min(1.0f, dist / std::max(1.0f, static_cast<float>(R)));
+                float mag = deflectStrength * falloff * static_cast<float>(R);
+                return {true, {sgn * nx * mag, sgn * ny * mag}};
+            }
+            return {false, {0.0f, 0.0f}};
+        };
+
         for (const Star &s : stars) {
-            uint32_t half = s.size / 2;
-            for (int dy = -int(half); dy <= int(half); ++dy) {
-                int yy = int(s.y) + dy; if (yy < 0 || yy >= int(image.height)) continue;
-                for (int dx = -int(half); dx <= int(half); ++dx) {
-                    int xx = int(s.x) + dx; if (xx < 0 || xx >= int(image.width)) continue;
-                    Color dst = getPixel(image, (uint32_t)xx, (uint32_t)yy);
-                    if (ignoreBackground || isBackgroundLike(dst, backgroundColor, bgRGBThreshold, alphaMaxThreshold)) {
-                        setPixelAdd(image, (uint32_t)xx, (uint32_t)yy, s.color);
-                        starsDrawn++;
+            // compute twinkle brightness
+            float brightness = 1.0f;
+            if (twinkleEnabled && twinklePeriodFrames > 0) {
+                // pseudo-random phase from position and size
+                uint32_t phaseHash = fastHash((s.x * 73856093u) ^ (s.y * 19349663u) ^ (s.size * 83492791u));
+                float phase = static_cast<float>(phaseHash & 0xffffu) / 65535.0f;
+                float t = static_cast<float>(absoluteFrameNumber) / static_cast<float>(twinklePeriodFrames);
+                brightness = 0.5f + 0.5f * std::sin(2.0f * 3.14159265f * (t + phase));
+                brightness = std::clamp(brightness, 0.25f, 1.0f);
+            }
+
+            // compute deflection from nearby text
+            float offx = 0.0f, offy = 0.0f;
+            if (deflectEnabled) {
+                auto nv = nearestTextVector(static_cast<int>(s.x), static_cast<int>(s.y));
+                if (nv.first) { offx = nv.second.first; offy = nv.second.second; }
+            }
+
+            // draw trails from tail to head so head overlays tail
+            int maxTrail = std::max(0, trailLength);
+            for (int k = maxTrail; k >= 0; --k) {
+                // attenuate with fade
+                float att = (k == 0) ? 1.0f : std::pow(std::clamp(trailFade, 0.0f, 0.99f), static_cast<float>(k));
+                float b = brightness * att;
+                Color c = s.color;
+                c.r = static_cast<unsigned char>(std::min(255.0f, c.r * b));
+                c.g = static_cast<unsigned char>(std::min(255.0f, c.g * b));
+                c.b = static_cast<unsigned char>(std::min(255.0f, c.b * b));
+
+                // position with trail offset along -x axis based on k
+                int xTrail = static_cast<int>(s.x) - k * static_cast<int>(std::round(std::max(1.0f, static_cast<float>(s.size))));
+                while (xTrail < 0) xTrail += static_cast<int>(image.width);
+                while (xTrail >= static_cast<int>(image.width)) xTrail -= static_cast<int>(image.width);
+
+                uint32_t half = s.size / 2;
+                for (int dy = -int(half); dy <= int(half); ++dy) {
+                    int yy = static_cast<int>(std::round(int(s.y) + dy + offy)); if (yy < 0 || yy >= int(image.height)) continue;
+                    for (int dx = -int(half); dx <= int(half); ++dx) {
+                        int xx = static_cast<int>(std::round(xTrail + dx + offx)); if (xx < 0) xx += static_cast<int>(image.width); if (xx >= static_cast<int>(image.width)) xx -= static_cast<int>(image.width);
+                        drawOne(xx, yy, c);
                     }
                 }
             }
@@ -2516,7 +2607,17 @@ namespace mvm {
                       size_t starsLayer2Count = 80,  float starsLayer2Speed = 1.4f,
                       uint32_t starsSeed = 1337u,
                       uint32_t starsSizePx = 3,
-                      bool starsForeground = false)
+                      bool starsForeground = false,
+                      bool starsTwinkle = false,
+                      int starsTwinklePeriod = 48,
+                      int starsTrailLength = 0,
+                      float starsTrailFade = 0.75f,
+                      const std::vector<float> &starsYOffsetPerLayer = {},
+                      bool starsDeflect = false,
+                      bool starsDeflectAttract = true,
+                      int starsDeflectRange = 24,
+                      float starsDeflectStrength = 0.5f,
+                      bool starsDeflectOcclude = true)
     {
         // helper: easing function
         auto applyEase = [](const std::string &mode, float t) -> float {
@@ -2588,8 +2689,15 @@ namespace mvm {
                         {starsLayer2Count/2, starsLayer2Speed*1.8f},
                         {starsLayer1Count/2, starsLayer1Speed*0.6f}
                     };
+                    std::vector<float> yOffsets;
+                    if (!starsYOffsetPerLayer.empty()) yOffsets = starsYOffsetPerLayer;
                     drawStarfieldOverlay(out, colorBackground, frameNumber,
-                                          starLayers,
+                                          starLayers, yOffsets,
+                                          starsTwinkle, starsTwinklePeriod,
+                                          starsTrailLength, starsTrailFade,
+                                          starsDeflect, starsDeflectAttract,
+                                          starsDeflectRange, starsDeflectStrength,
+                                          starsDeflectOcclude,
                                           starsSeed,
                                           5,    // RGB threshold (assuming black bg)
                                           5,    // alpha threshold
@@ -2736,8 +2844,15 @@ namespace mvm {
                         {starsLayer2Count/2, starsLayer2Speed*1.8f},
                         {starsLayer1Count/2, starsLayer1Speed*0.6f}
                     };
+                    std::vector<float> yOffsets;
+                    if (!starsYOffsetPerLayer.empty()) yOffsets = starsYOffsetPerLayer;
                     drawStarfieldOverlay(imageTarget, colorBackground, frameNumber,
-                                          starLayers,
+                                          starLayers, yOffsets,
+                                          starsTwinkle, starsTwinklePeriod,
+                                          starsTrailLength, starsTrailFade,
+                                          starsDeflect, starsDeflectAttract,
+                                          starsDeflectRange, starsDeflectStrength,
+                                          starsDeflectOcclude,
                                           starsSeed,
                                           5,    // RGB threshold (assuming black bg)
                                           5,    // alpha threshold
@@ -2775,8 +2890,15 @@ namespace mvm {
                         {starsLayer2Count/2, starsLayer2Speed*1.8f},
                         {starsLayer1Count/2, starsLayer1Speed*0.6f}
                     };
+                    std::vector<float> yOffsets;
+                    if (!starsYOffsetPerLayer.empty()) yOffsets = starsYOffsetPerLayer;
                     drawStarfieldOverlay(out, colorBackground, frameNumber,
-                                          starLayers,
+                                          starLayers, yOffsets,
+                                          starsTwinkle, starsTwinklePeriod,
+                                          starsTrailLength, starsTrailFade,
+                                          starsDeflect, starsDeflectAttract,
+                                          starsDeflectRange, starsDeflectStrength,
+                                          starsDeflectOcclude,
                                           starsSeed,
                                           5,    // RGB threshold (assuming black bg)
                                           5,    // alpha threshold
@@ -2817,8 +2939,18 @@ static void printUsage()
     fmt::println("  --stars-layer1 <count,speed> Layer1 stars and speed in px/frame (e.g., 200,0.7)");
     fmt::println("  --stars-layer2 <count,speed> Layer2 stars and speed in px/frame (e.g., 80,1.4)");
     fmt::println("  --stars-seed     <num>       Seed for deterministic star positions");
-    fmt::println("  --stars-size     <px>        Star size in pixels (default: 3)");
+    fmt::println("  --stars-size     <px>        Base star size scale (default: 3)");
     fmt::println("  --stars-foreground           Draw stars in the foreground (ignore background)");
+    fmt::println("  --stars-twinkle              Enable star alpha twinkling");
+    fmt::println("  --stars-twinkle-period <f>   Twinkle period in frames (default: 48)");
+    fmt::println("  --stars-trails   <N>         Draw N-length additive trails behind stars");
+    fmt::println("  --stars-trail-fade <0..1>    Trail attenuation per step (default: 0.75)");
+    fmt::println("  --stars-yoffsets v1,v2,...   Per-layer vertical offsets in pixels (for VU-like motion)");
+    fmt::println("  --stars-deflect               Enable deflection around title glyphs");
+    fmt::println("  --stars-deflect-mode <m>     attract|repel (default: attract)");
+    fmt::println("  --stars-deflect-range <px>   Max sampling radius around text (default: 24)");
+    fmt::println("  --stars-deflect-strength <s> Strength 0..1 (default: 0.5)");
+    fmt::println("  --stars-deflect-occlude      Don’t draw over non-background (default on). Use --no-stars-deflect-occlude to disable");
     fmt::println("  --rotate                    Enable rotation during interpolation");
     fmt::println("  --help, -h                  Show this help");
 }
@@ -2920,6 +3052,11 @@ int main(int argc, char** argv) {
     uint32_t starsSeed = 1337u;
     uint32_t starsSizePx = 3;
     bool starsForeground = false;
+    // new star options
+    bool starsTwinkle = false; int starsTwinklePeriod = 48; // frames for a cycle at 25fps ~2s
+    int starsTrailLength = 0; float starsTrailFade = 0.75f;
+    std::vector<float> starsYOffsetPerLayer; // optional per-layer vertical offsets
+    bool starsDeflect = false; bool starsDeflectAttract = true; int starsDeflectRange = 24; float starsDeflectStrength = 0.5f; bool starsDeflectOcclude = true;
     size_t keyframeHoldFrames = 0; // disabled by default
     bool hasFirstKfHold = false;
     bool hasLastKfHold = false;
@@ -2973,6 +3110,36 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) starsSizePx = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--stars-foreground") {
             starsForeground = true;
+        } else if (arg == "--stars-twinkle") {
+            starsTwinkle = true;
+        } else if (arg == "--stars-twinkle-period") {
+            if (i + 1 < argc) starsTwinklePeriod = std::max(1, std::stoi(argv[++i]));
+        } else if (arg == "--stars-trails") {
+            if (i + 1 < argc) starsTrailLength = std::max(0, std::stoi(argv[++i]));
+        } else if (arg == "--stars-trail-fade") {
+            if (i + 1 < argc) starsTrailFade = std::stof(argv[++i]);
+        } else if (arg == "--stars-yoffsets") {
+            if (i + 1 < argc) {
+                starsYOffsetPerLayer.clear();
+                std::string v = argv[++i];
+                std::stringstream ss(v);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) {
+                    if (!tok.empty()) starsYOffsetPerLayer.push_back(std::stof(tok));
+                }
+            }
+        } else if (arg == "--stars-deflect") {
+            starsDeflect = true;
+        } else if (arg == "--stars-deflect-mode") {
+            if (i + 1 < argc) { std::string m = argv[++i]; starsDeflectAttract = (m != "repel"); }
+        } else if (arg == "--stars-deflect-range") {
+            if (i + 1 < argc) starsDeflectRange = std::max(0, std::stoi(argv[++i]));
+        } else if (arg == "--stars-deflect-strength") {
+            if (i + 1 < argc) starsDeflectStrength = std::stof(argv[++i]);
+        } else if (arg == "--stars-deflect-occlude") {
+            starsDeflectOcclude = true;
+        } else if (arg == "--no-stars-deflect-occlude") {
+            starsDeflectOcclude = false;
         } else if (arg == "--rotate") {
             rotate = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -3032,7 +3199,14 @@ int main(int argc, char** argv) {
                 enableStars,
                 starsLayer1Count, starsLayer1Speed,
                 starsLayer2Count, starsLayer2Speed,
-                starsSeed
+                starsSeed,
+                starsSizePx,
+                starsForeground,
+                starsTwinkle,
+                starsTwinklePeriod,
+                starsTrailLength,
+                starsTrailFade,
+                starsYOffsetPerLayer
             );
             startFrame += (inHold + framesPerTransition + outHold);
         }

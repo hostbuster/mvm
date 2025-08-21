@@ -78,6 +78,16 @@ These options are active when `--input-dir` is provided.
   - `--stars-seed <num>`: Seed for deterministic star positions.
   - `--stars-size <px>`: Base star size scaling factor (default: `3`). Actual star size derives from layer speed and jitter.
   - `--stars-foreground`: Draw stars after image interpolation (ignoring background gating) to ensure visibility.
+  - `--stars-twinkle`: Enable per-star alpha twinkle.
+  - `--stars-twinkle-period <frames>`: Twinkle cycle length (default: `48`).
+  - `--stars-trails <N>`: Draw N trailing steps behind stars (additive).
+  - `--stars-trail-fade <0..1>`: Trail attenuation per step (default: `0.75`).
+  - `--stars-yoffsets v1,v2,...`: Per-layer vertical offsets (e.g., for VU-like motion).
+  - `--stars-deflect`: Deflect stars near title pixels for interaction.
+  - `--stars-deflect-mode <attract|repel>`: Direction of deflection (default: `attract`).
+  - `--stars-deflect-range <px>`: Sampling radius around text pixels (default: `24`).
+  - `--stars-deflect-strength <0..1>`: Strength of deflection (default: `0.5`).
+  - `--stars-deflect-occlude`: Don’t draw stars over non-background (default on). Use `--no-stars-deflect-occlude` to disable.
 - `--help, -h`: Print help and exit.
 
 Notes:
